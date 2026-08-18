@@ -115,6 +115,8 @@ def determine_risk_floor(task: dict[str, Any]) -> str:
 def is_ultra_candidate(task: dict[str, Any]) -> bool:
     return (
         task["parallelizable"]
+        and task["action_scope"] != "external_effect"
+        and task["stage"] != "deploy"
         and task["complexity"] == 5
         and task["context_load"] == 5
         and task["tool_load"] >= 4

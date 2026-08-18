@@ -56,6 +56,20 @@ class RoutingFixtureTests(unittest.TestCase):
                     self.assertEqual(actual["model"], "gpt-5.6-sol")
                     self.assertIn(actual["effort"], allowed_efforts)
 
+    def test_external_deploy_never_auto_routes_ultra(self) -> None:
+        task = dict(load_fixtures()[11]["task"])
+        task.update(
+            {
+                "stage": "deploy",
+                "action_scope": "external_effect",
+                "error_cost": 5,
+                "risk_flags": ["production", "irreversible"],
+            }
+        )
+        actual = route(task)
+        self.assertEqual(actual["model"], "gpt-5.6-sol")
+        self.assertEqual(actual["effort"], "xhigh")
+
     def test_spark_is_only_used_for_eligible_text_coding(self) -> None:
         for fixture in load_fixtures():
             actual = route(fixture["task"])

@@ -39,7 +39,7 @@
 
 从上到下命中第一条适用规则：
 
-1. **Ultra 并行任务**：任务可拆成彼此独立的部分，且 `complexity == 5`、`context_load == 5`、`tool_load >= 4`，选 `gpt-5.6-sol` + `ultra`。Ultra 是多 Agent 并行，不是普通“更深思考”。
+1. **Ultra 并行任务**：任务可拆成彼此独立的部分，且不是上线或外部动作，并满足 `complexity == 5`、`context_load == 5`、`tool_load >= 4`，选 `gpt-5.6-sol` + `ultra`。Ultra 是多 Agent 并行，不是普通“更深思考”；生产变更不得因可并行而自动走 Ultra。
 2. **关键或高风险任务**：`risk_floor` 为 `critical` 或 `high`，选 `gpt-5.6-sol`。默认 `high`；只有处于生产部署或 `error_cost == 5` 时自动升到 `xhigh`。其他任务即使负荷较高，也先以 `high` 获取代表性结果，再按实测质量决定是否升档。
 3. **极速小型编码迭代**：同时满足 `task_kind == coding`、`rapid_coding_iteration == true`、`text_only == true`、无风险标记、非外部动作、`complexity <= 2`、`ambiguity <= 2`、`context_load <= 3`、`tool_load <= 3`、`error_cost <= 2`，选 `gpt-5.3-codex-spark` + `high`。
 4. **清晰且可重复的批处理**：`ambiguity <= 2`、`repeatability >= 4`、`complexity <= 3`、`tool_load <= 3`、`error_cost <= 2`、非外部动作，选 `gpt-5.6-luna` + `medium`。若范围极小且优先速度或额度，可用 `low`。
