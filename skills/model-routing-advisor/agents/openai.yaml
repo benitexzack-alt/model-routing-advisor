@@ -1,0 +1,4 @@
+interface:
+  display_name: "模型路由顾问"
+  short_description: "按任务阶段、风险、复杂度与额度成本推荐模型和推理档位"
+  default_prompt: "使用 $model-routing-advisor 在执行任务前生成模型与推理档位路由卡。"

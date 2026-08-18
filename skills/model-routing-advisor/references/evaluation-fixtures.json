@@ -1,0 +1,333 @@
+[
+  {
+    "id": "local-dashboard-readonly-check",
+    "title": "本地看板只读健康检查",
+    "task": {
+      "stage": "investigate",
+      "action_scope": "read_only",
+      "task_kind": "operations",
+      "complexity": 2,
+      "ambiguity": 2,
+      "context_load": 2,
+      "tool_load": 3,
+      "error_cost": 2,
+      "latency_need": 4,
+      "repeatability": 3,
+      "parallelizable": false,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "balanced",
+      "risk_flags": []
+    },
+    "expected": {
+      "model": "gpt-5.6-terra",
+      "effort": "medium",
+      "risk_floor": "low"
+    }
+  },
+  {
+    "id": "single-css-fix",
+    "title": "单一 CSS 样式修复",
+    "task": {
+      "stage": "execute",
+      "action_scope": "local_write",
+      "task_kind": "coding",
+      "complexity": 1,
+      "ambiguity": 1,
+      "context_load": 1,
+      "tool_load": 2,
+      "error_cost": 1,
+      "latency_need": 5,
+      "repeatability": 3,
+      "parallelizable": false,
+      "rapid_coding_iteration": true,
+      "text_only": true,
+      "preference": "quota",
+      "risk_flags": []
+    },
+    "expected": {
+      "model": "gpt-5.3-codex-spark",
+      "effort": "high",
+      "risk_floor": "low"
+    }
+  },
+  {
+    "id": "cross-stack-502-diagnosis",
+    "title": "跨前后端 502 故障诊断",
+    "task": {
+      "stage": "investigate",
+      "action_scope": "local_write",
+      "task_kind": "coding",
+      "complexity": 4,
+      "ambiguity": 4,
+      "context_load": 4,
+      "tool_load": 4,
+      "error_cost": 3,
+      "latency_need": 4,
+      "repeatability": 2,
+      "parallelizable": true,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "balanced",
+      "risk_flags": []
+    },
+    "expected": {
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "risk_floor": "medium"
+    }
+  },
+  {
+    "id": "production-deploy-rollback",
+    "title": "生产部署与回滚预案",
+    "task": {
+      "stage": "deploy",
+      "action_scope": "external_effect",
+      "task_kind": "operations",
+      "complexity": 5,
+      "ambiguity": 3,
+      "context_load": 5,
+      "tool_load": 5,
+      "error_cost": 5,
+      "latency_need": 3,
+      "repeatability": 2,
+      "parallelizable": false,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "quota",
+      "risk_flags": [
+        "production",
+        "security",
+        "irreversible"
+      ]
+    },
+    "expected": {
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "risk_floor": "critical"
+    }
+  },
+  {
+    "id": "time-sensitive-research",
+    "title": "需要现行信源的时效调研",
+    "task": {
+      "stage": "investigate",
+      "action_scope": "read_only",
+      "task_kind": "research",
+      "complexity": 3,
+      "ambiguity": 3,
+      "context_load": 3,
+      "tool_load": 4,
+      "error_cost": 3,
+      "latency_need": 3,
+      "repeatability": 2,
+      "parallelizable": true,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "balanced",
+      "risk_flags": []
+    },
+    "expected": {
+      "model": "gpt-5.6-terra",
+      "effort": "high",
+      "risk_floor": "medium"
+    }
+  },
+  {
+    "id": "formal-douyin-script",
+    "title": "正式抖音口播稿定稿",
+    "task": {
+      "stage": "execute",
+      "action_scope": "local_write",
+      "task_kind": "content",
+      "complexity": 4,
+      "ambiguity": 4,
+      "context_load": 5,
+      "tool_load": 3,
+      "error_cost": 4,
+      "latency_need": 2,
+      "repeatability": 2,
+      "parallelizable": false,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "quality",
+      "risk_flags": [
+        "public_release",
+        "legal"
+      ]
+    },
+    "expected": {
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "risk_floor": "critical"
+    }
+  },
+  {
+    "id": "aigc-production-batch",
+    "title": "AIGC 图像视频批次生产",
+    "task": {
+      "stage": "execute",
+      "action_scope": "local_write",
+      "task_kind": "media",
+      "complexity": 3,
+      "ambiguity": 3,
+      "context_load": 4,
+      "tool_load": 5,
+      "error_cost": 3,
+      "latency_need": 3,
+      "repeatability": 5,
+      "parallelizable": true,
+      "rapid_coding_iteration": false,
+      "text_only": false,
+      "preference": "balanced",
+      "risk_flags": []
+    },
+    "expected": {
+      "model": "gpt-5.6-terra",
+      "effort": "high",
+      "risk_floor": "medium"
+    }
+  },
+  {
+    "id": "real-business-closed-loop",
+    "title": "真实付费业务闭环验证",
+    "task": {
+      "stage": "verify",
+      "action_scope": "external_effect",
+      "task_kind": "business",
+      "complexity": 5,
+      "ambiguity": 4,
+      "context_load": 5,
+      "tool_load": 5,
+      "error_cost": 5,
+      "latency_need": 2,
+      "repeatability": 1,
+      "parallelizable": false,
+      "rapid_coding_iteration": false,
+      "text_only": false,
+      "preference": "quota",
+      "risk_flags": [
+        "payment",
+        "privacy",
+        "client_delivery",
+        "irreversible"
+      ]
+    },
+    "expected": {
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "risk_floor": "critical"
+    }
+  },
+  {
+    "id": "geo-client-report",
+    "title": "GEO 客户正式交付报告",
+    "task": {
+      "stage": "execute",
+      "action_scope": "local_write",
+      "task_kind": "business",
+      "complexity": 4,
+      "ambiguity": 4,
+      "context_load": 5,
+      "tool_load": 4,
+      "error_cost": 4,
+      "latency_need": 2,
+      "repeatability": 2,
+      "parallelizable": true,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "quality",
+      "risk_flags": [
+        "client_delivery"
+      ]
+    },
+    "expected": {
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "risk_floor": "critical"
+    }
+  },
+  {
+    "id": "knowledge-base-governance",
+    "title": "个人知识库治理与来源分层",
+    "task": {
+      "stage": "plan",
+      "action_scope": "local_write",
+      "task_kind": "governance",
+      "complexity": 4,
+      "ambiguity": 3,
+      "context_load": 5,
+      "tool_load": 4,
+      "error_cost": 4,
+      "latency_need": 2,
+      "repeatability": 3,
+      "parallelizable": true,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "balanced",
+      "risk_flags": [
+        "privacy"
+      ]
+    },
+    "expected": {
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "risk_floor": "critical"
+    }
+  },
+  {
+    "id": "batch-extract-deduplicate",
+    "title": "批量文本提取与去重",
+    "task": {
+      "stage": "execute",
+      "action_scope": "local_write",
+      "task_kind": "operations",
+      "complexity": 2,
+      "ambiguity": 1,
+      "context_load": 3,
+      "tool_load": 2,
+      "error_cost": 2,
+      "latency_need": 4,
+      "repeatability": 5,
+      "parallelizable": true,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "quota",
+      "risk_flags": []
+    },
+    "expected": {
+      "model": "gpt-5.6-luna",
+      "effort": "medium",
+      "risk_floor": "low"
+    }
+  },
+  {
+    "id": "parallel-multi-repo-audit",
+    "title": "可并行拆分的多仓库架构审计",
+    "task": {
+      "stage": "investigate",
+      "action_scope": "read_only",
+      "task_kind": "governance",
+      "complexity": 5,
+      "ambiguity": 4,
+      "context_load": 5,
+      "tool_load": 5,
+      "error_cost": 4,
+      "latency_need": 2,
+      "repeatability": 2,
+      "parallelizable": true,
+      "rapid_coding_iteration": false,
+      "text_only": true,
+      "preference": "quality",
+      "risk_flags": [
+        "security",
+        "privacy"
+      ]
+    },
+    "expected": {
+      "model": "gpt-5.6-sol",
+      "effort": "ultra",
+      "risk_floor": "critical"
+    }
+  }
+]

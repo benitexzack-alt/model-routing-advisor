@@ -1,0 +1,42 @@
+# 当前模型目录
+
+> 核验日期：2026-08-19
+>
+> 最迟刷新日：2026-09-02（14 天）
+>
+> 本机缓存快照：Codex `0.148.0`，`fetched_at=2026-08-18T17:11:16Z`，`etag=W/"44c9b426a82fd434824fbf9e653383b3"`
+
+本目录只记录当前可用模型事实，供路由规则引用，不代替具体任务评估。相对额度仅使用“低 / 中 / 高 / 独立池”表示；实际消耗会随上下文长度、推理档位、工具调用和速度配置变化，不承诺固定次数、百分比或节省幅度。
+
+## 本机可用组合
+
+| 模型 | 主要用途 | 相对额度 | 输入模态 | 本机支持档位 | 本机缓存默认 | 关键限制 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gpt-5.6-sol` | 复杂、开放、模糊或高价值工作；复杂编码、深度研究、计算机操作和需要判断与打磨的交付物 | 高（通用池） | 文本、图像 | `low`、`medium`、`high`、`xhigh`、`max`、`ultra` | `low` | `max` 只用于最难且质量优先的单任务；`ultra` 是多代理并行模式，只适合能拆成独立工作流的大任务。`gpt-5.6` 别名指向该模型 |
+| `gpt-5.6-terra` | 日常主力；需要较强推理和工具调用，但不需要 Sol 全部深度的工作 | 中（通用池） | 文本、图像 | `low`、`medium`、`high`、`xhigh`、`max`、`ultra` | `medium` | 官方定位为智能与成本的平衡点，也是原先交给 GPT-5.5 的日常工作的自然起点；不要因可用 `max` 或 `ultra` 就默认启用 |
+| `gpt-5.6-luna` | 目标明确、可重复、高吞吐的提取、分类、转换、结构化摘要和轻量编码 | 低（通用池） | 文本、图像 | `low`、`medium`、`high`、`xhigh`、`max` | `medium` | 本机不支持 `ultra`；不适合作为高歧义、高错误代价任务的纯额度降级方案 |
+| `gpt-5.3-codex-spark` | 近即时、实时的编码迭代；小而清晰、反馈快的代码任务 | 独立额度池 | **仅文本** | `low`、`medium`、`high`、`xhigh` | `high` | ChatGPT Pro 专属研究预览；依赖专用低延迟硬件，额度独立且会随需求调整；发布时不提供 API；不能接收图像，也不支持 `max`、`ultra` |
+| `gpt-5.5` | 已验证的旧流程兼容、回归基线或用户明确指定的上一代复杂工作 | 较高（通用池） | 文本、图像 | `low`、`medium`、`high`、`xhigh` | `medium` | 官方已列为上一代前沿模型；**不得自动首选**。新任务优先从 Terra 或 Sol 做同类验证，只有历史结果、兼容性或 A/B 证据支持时才保留 |
+
+## 默认值解释
+
+- 表中的“本机缓存默认”来自 `/Users/pc/.codex/models_cache.json` 的 `default_reasoning_level`，用于校验本机实际可选组合。
+- 官方产品界面的默认 Power 目前是 `gpt-5.6-sol` + `medium`；这与本机缓存中 Sol 模型条目的 `low` 是不同层级的默认值。路由卡应显式写出模型和档位，避免依赖隐式默认。
+- GPT-5.6 API 支持 `none`，但当前本机选择器缓存没有列出 `none`，因此本项目不把它作为本机可选档位。
+- `high`、`xhigh` 仅在代表性任务证明质量提升时使用；`max` 留给最难的质量优先任务。多数任务不需要 `max` 或 `ultra`。
+
+## 刷新规则
+
+发生任一情况即重新核验并更新本文件：
+
+1. 距核验日满 14 天；
+2. `/Users/pc/.codex/models_cache.json` 的 `etag`、`fetched_at`、模型清单、输入模态、支持档位或默认档位变化；
+3. 官方模型页、价格页或 GPT-5.6 指南更新了可用性、定位、额度池或推理档位；
+4. 本机模型选择器出现与本目录不一致的可选项。
+
+## 官方依据
+
+- [Models｜ChatGPT Learn](https://learn.chatgpt.com/docs/models)：Codex 模型定位、输入限制、推荐用途、推理档位及 GPT-5.5 的上一代状态。
+- [Pricing｜ChatGPT Learn](https://learn.chatgpt.com/docs/pricing)：通用用量差异，以及 Spark 的 Pro 研究预览、专用硬件和独立额度池。
+- [Model guidance｜OpenAI API](https://developers.openai.com/api/docs/guides/latest-model)：GPT-5.6 三档定位、`gpt-5.6` 别名、推理档位和默认 `medium` 的 API 指南。
+- 本机可用组合：`/Users/pc/.codex/models_cache.json`。
