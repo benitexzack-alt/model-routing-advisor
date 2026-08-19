@@ -2,7 +2,7 @@
 
 为 Codex 项目和重要任务生成“模型 + 推理档位 + 相对额度 + 升降档条件”的确认卡，帮助在质量下限之上合理使用额度。
 
-当前状态：**V0.1 离线验证阶段，尚未接入全局强制启动流程。** Skill 只给建议并等待用户确认，不会自动切换当前模型。
+当前状态：**V0.1 真实任务试运行已于 2026-08-19 启动，尚未接入全局强制启动流程。** Skill 只给建议并等待用户确认，不会自动切换当前模型。
 
 ## 核心原则
 
@@ -19,13 +19,18 @@ Skill 位于 `skills/model-routing-advisor/`：
 - `SKILL.md`：触发说明与执行流程；
 - `references/`：当前模型目录、路由策略、路由卡格式和 12 个评估场景；
 - `scripts/route_model.py`：确定性路由基线；
-- `scripts/test_model_route.py`：离线回归测试。
+- `scripts/test_model_route.py`：离线路由回归测试；
+- `references/trial-protocol.md`：真实任务事件与复核规则；
+- `scripts/summarize_trial.py`：试运行证据校验与汇总；
+- `evidence/`：仅追加的试运行状态和事件日志。
 
 ## 验证
 
 ```bash
 python3 skills/model-routing-advisor/scripts/test_model_route.py
+python3 skills/model-routing-advisor/scripts/test_trial_summary.py
+python3 skills/model-routing-advisor/scripts/summarize_trial.py
 python3 /Users/pc/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/model-routing-advisor
 ```
 
-离线测试通过后，还需完成 7 天或至少 10 个真实任务试运行。只有达到“高风险零降错、用户接受率至少 80%、同类任务路由稳定、没有重复打断”的门槛，才进入全局接入阶段。
+离线测试通过后，还需完成 7 天或至少 10 个真实任务试运行。只有达到“高风险零降错、用户接受率至少 80%、同类任务路由稳定、没有重复打断、至少一个可核验效率改善信号”的门槛，才进入人工复核；是否接入全局流程仍由用户另行确认。

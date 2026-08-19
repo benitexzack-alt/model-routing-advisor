@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "trial_id": "trial-20260819-v0.1-01",
+  "status": "active",
+  "started_at": "2026-08-19T10:12:22+08:00",
+  "source_commit": "db98b44",
+  "targets": {
+    "review_eligibility": {
+      "elapsed_calendar_days_min": 7,
+      "completed_tasks_min": 10,
+      "operator": "OR"
+    },
+    "route_acceptance_rate_min": 0.8,
+    "high_risk_under_routing_max": 0,
+    "same_class_unexplained_route_changes_max": 0,
+    "duplicate_prompts_max": 0,
+    "verified_efficiency_signals_min": 1
+  },
+  "global_gate_enabled": false,
+  "log_path": "evidence/trial-events.jsonl",
+  "rollback": {
+    "available": true,
+    "action": "停止新增路由提示和试运行事件，将状态改为 rolled_back；保留既有证据，不删除或改写 JSONL 日志。",
+    "global_configuration_changed": false,
+    "restore_baseline_commit": "db98b44"
+  }
+}

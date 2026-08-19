@@ -15,7 +15,8 @@ description: "在项目或重要任务开始前，根据当前阶段、动作范
 4. 把分类结果传给 `scripts/route_model.py`。使用 `--json` 传 JSON 字符串或用 `--input` 传 JSON 文件；脚本输出仅是确定性基线，仍需核对真实任务语义和当前模型可用性。
 5. 完整读取 [路由卡格式](references/routing-card-schema.md)，把机器结果转成一屏内的中文路由卡。明确标注推断、风险下限、相对额度、升档条件和降档条件。
 6. 请求用户在“按推荐执行 / 优先节省额度 / 优先保证质量”中确认。Skill 不会自动切换当前任务的模型；用户确认后，再按当前界面或运行时能力切换。
-7. 在同一阶段沿用已确认路由。只有阶段、动作范围、风险、上下文规模、交付对象或用户偏好显著变化时才重新路由。
+7. 若 V0.1 真实任务试运行处于激活状态，按“试运行记录”一节写入已确认的路由决策；不要在用户明确选择前记为接受。
+8. 在同一阶段沿用已确认路由。只有阶段、动作范围、风险、上下文规模、交付对象或用户偏好显著变化时才重新路由。
 
 ## 硬约束
 
@@ -33,6 +34,18 @@ description: "在项目或重要任务开始前，根据当前阶段、动作范
 - 公开内容先服从内容门禁；被阻断时不进入写稿、制作或发布，无论推荐模型多强。
 - 多 Agent 的角色和任务图由编排机制决定；本 Skill 只决定模型与推理档位。只有推荐 `ultra` 时才把“可真实并行”作为前提。
 
+## 试运行记录
+
+先检查 `/Users/pc/Documents/model-routing-advisor/evidence/trial-state.json`。仅当它存在且 `status` 为 `active` 时，完整读取 [试运行协议](references/trial-protocol.md)，并把事件追加到 `/Users/pc/Documents/model-routing-advisor/evidence/trial-events.jsonl`：
+
+- 用户明确确认或改选路由卡后，用 `apply_patch` 追加一个 `route_decision`；完整复制送入路由器的原始字段和 `router_version`，不从推荐结果反推风险或评分；同一阶段的一次真实任务及其结果沿用同一个 `task_id`，阶段变化需要重新路由时创建新的 `task_id`。
+- 任务完成、阻断、取消或停止时，用 `apply_patch` 追加一个 `task_outcome`。实际模型、档位、返工、耗时、评分或额度没有证据时写 `null`，不得猜测；填写返工或额度改善时，同时写入可定位的测试、验收、用户反馈或界面观测说明，否则不计效率信号。
+- 录错时追加带 `supersedes_event_id` 的更正事件，不修改或删除历史行。
+- 日志失败时明确标记 `trial-log-failed`；不要把该任务计入试运行证据，也不要声称试运行指标已更新。
+- 每次追加后先运行 `scripts/summarize_trial.py`；校验通过后只暂存本次证据文件，确认相对上一个 Git 锚点只有尾部新增行，再提交和推送。不要用批量暂存把无关改动带入证据提交。
+
+需要查看进度时，运行 `scripts/summarize_trial.py`。汇总结果只决定是否进入人工复核，不能自动启用全局门。
+
 ## 维护与验证
 
-维护本 Skill 时，使用 [离线评估夹具](references/evaluation-fixtures.json) 运行 `scripts/test_model_route.py`，再运行 Skill Creator 的 `quick_validate.py`。离线通过后仍需完成 7 天或至少 10 个真实任务的试运行，记录用户是否接受、返工轮数、升降档、相对额度和质量判断；在此之前不要接入全局强制门。
+维护本 Skill 时，使用 [离线评估夹具](references/evaluation-fixtures.json) 运行 `scripts/test_model_route.py` 与 `scripts/test_trial_summary.py`，再运行 Skill Creator 的 `quick_validate.py`。达到 7 天或至少 10 个真实任务后，用试运行协议的全部指标进行人工复核；在用户单独确认前不要接入全局强制门。

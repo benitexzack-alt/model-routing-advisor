@@ -55,6 +55,7 @@ SUPPORTED_EFFORTS = {
     "gpt-5.6-terra": {"low", "medium", "high", "xhigh", "max", "ultra"},
     "gpt-5.6-luna": {"low", "medium", "high", "xhigh", "max"},
     "gpt-5.3-codex-spark": {"low", "medium", "high", "xhigh"},
+    "gpt-5.5": {"low", "medium", "high", "xhigh"},
 }
 
 
