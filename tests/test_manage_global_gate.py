@@ -11,11 +11,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Dict, List, Optional
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import manage_global_gate as gate_module  # noqa: E402
 from manage_global_gate import (  # noqa: E402
     AGENTS_BEGIN,
     AGENTS_END,
@@ -27,21 +29,69 @@ from manage_global_gate import (  # noqa: E402
 
 
 class FakeRpc:
-    def __init__(self, listings: List[Dict]) -> None:
+    def __init__(
+        self,
+        listings: List[Dict],
+        hook_state: Optional[Dict] = None,
+        config_path: Optional[Path] = None,
+        fail_config_read_calls: Optional[List[int]] = None,
+    ) -> None:
         self.listings = list(listings)
+        self.last_listing = None
         self.calls = []  # type: List[tuple]
+        self.hook_state = dict(hook_state or {})
+        self.config_path = config_path or Path("/tmp/codex-home/config.toml")
+        self.version = 1
+        self.config_read_count = 0
+        self.fail_config_read_calls = set(fail_config_read_calls or [])
 
     def call(self, method: str, params: dict) -> dict:
         self.calls.append((method, params))
         if method == "hooks/list":
             if not self.listings:
-                raise AssertionError("没有为 hooks/list 准备响应")
-            return self.listings.pop(0)
+                if self.last_listing is None:
+                    raise AssertionError("没有为 hooks/list 准备响应")
+                return self.last_listing
+            self.last_listing = self.listings.pop(0)
+            return self.last_listing
         if method == "config/batchWrite":
+            expected = params.get("expectedVersion")
+            if expected is not None and expected != "version-%d" % self.version:
+                raise AssertionError("expectedVersion 不匹配")
+            for edit in params.get("edits", []):
+                prefix = "hooks.state."
+                key_path = edit.get("keyPath", "")
+                if not key_path.startswith(prefix):
+                    raise AssertionError("测试仅支持精确 hooks.state 项写入")
+                key = json.loads(key_path[len(prefix) :])
+                if edit.get("value") is None:
+                    self.hook_state.pop(key, None)
+                else:
+                    self.hook_state[key] = edit["value"]
+            self.version += 1
             return {
                 "filePath": params.get("filePath"),
                 "status": "ok",
-                "version": "test-version",
+                "version": "version-%d" % self.version,
+            }
+        if method == "config/read":
+            self.config_read_count += 1
+            if self.config_read_count in self.fail_config_read_calls:
+                raise GateError("simulated config/read failure")
+            return {
+                "config": {},
+                "origins": {},
+                "layers": [
+                    {
+                        "name": {
+                            "type": "user",
+                            "file": str(self.config_path),
+                            "profile": None,
+                        },
+                        "version": "version-%d" % self.version,
+                        "config": {"hooks": {"state": dict(self.hook_state)}},
+                    }
+                ],
             }
         raise AssertionError(f"未预期的 RPC 方法：{method}")
 
@@ -54,9 +104,10 @@ def hook_listing(
     current_hash: str = "sha256:gate-hook-hash",
     enabled: bool = True,
     extra_hooks: Optional[List[Dict]] = None,
+    hook_key: Optional[str] = None,
 ) -> dict:
     target = {
-        "key": f"{hooks_path}:user_prompt_submit:1:0",
+        "key": hook_key or f"{hooks_path}:user_prompt_submit:0:0",
         "eventName": "userPromptSubmit",
         "handlerType": "command",
         "command": command,
@@ -280,6 +331,126 @@ class GlobalGateManagerTests(unittest.TestCase):
         self.assertFalse(self.paths.state.exists())
         self.assertIsNotNone(uninstall.backup_id)
 
+    def test_trusted_install_uninstall_restores_only_target_trust_entry(self) -> None:
+        target_key = f"{self.paths.hooks}:user_prompt_submit:0:0"
+        unrelated_key = f"{self.paths.hooks}:stop:0:0"
+        rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="untrusted",
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="trusted",
+                ),
+            ],
+            hook_state={unrelated_key: {"trusted_hash": "sha256:unrelated"}},
+            config_path=self.paths.config,
+        )
+        manager = GlobalGateManager(self.paths, rpc_factory=lambda: rpc)
+
+        manager.install(trust=True)
+        self.assertIn(target_key, rpc.hook_state)
+        self.assertEqual(
+            rpc.hook_state[unrelated_key], {"trusted_hash": "sha256:unrelated"}
+        )
+        state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        self.assertTrue(state["trust_managed"])
+        self.assertEqual(
+            state["trust_restore"],
+            {"key": target_key, "exists": False, "value": None},
+        )
+
+        manager.uninstall()
+        self.assertNotIn(target_key, rpc.hook_state)
+        self.assertEqual(
+            rpc.hook_state,
+            {unrelated_key: {"trusted_hash": "sha256:unrelated"}},
+        )
+
+    def test_failure_after_trust_write_restores_trust_and_files(self) -> None:
+        target_key = f"{self.paths.hooks}:user_prompt_submit:0:0"
+        unrelated_key = f"{self.paths.hooks}:stop:0:0"
+        rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="untrusted",
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="trusted",
+                ),
+            ],
+            hook_state={unrelated_key: {"trusted_hash": "sha256:unrelated"}},
+            config_path=self.paths.config,
+        )
+        real_atomic_write = gate_module.atomic_write
+
+        def fail_final_state(path: Path, data: bytes, mode: int) -> None:
+            if path == self.paths.state and b'"trust_status": "trusted"' in data:
+                raise OSError("simulated final state failure")
+            real_atomic_write(path, data, mode)
+
+        with mock.patch.object(gate_module, "atomic_write", side_effect=fail_final_state):
+            with self.assertRaisesRegex(OSError, "simulated"):
+                GlobalGateManager(self.paths, rpc_factory=lambda: rpc).install(
+                    trust=True
+                )
+
+        self.assertNotIn(target_key, rpc.hook_state)
+        self.assertEqual(
+            rpc.hook_state,
+            {unrelated_key: {"trusted_hash": "sha256:unrelated"}},
+        )
+        self.assertEqual(self.paths.agents.read_text(encoding="utf-8"), self.original_agents)
+        self.assertEqual(json.loads(self.paths.hooks.read_text()), self.original_hooks)
+        self.assertFalse(self.paths.target_hook.exists())
+        self.assertFalse(self.paths.state.exists())
+
+    def test_uninstall_postwrite_read_failure_rolls_back_trust_transaction(self) -> None:
+        target_key = f"{self.paths.hooks}:user_prompt_submit:0:0"
+        unrelated_key = f"{self.paths.hooks}:stop:0:0"
+        rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="untrusted",
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="trusted",
+                ),
+            ],
+            hook_state={unrelated_key: {"enabled": False}},
+            config_path=self.paths.config,
+            fail_config_read_calls=[4],
+        )
+        manager = GlobalGateManager(self.paths, rpc_factory=lambda: rpc)
+        manager.install(trust=True)
+        installed_agents = self.paths.agents.read_bytes()
+        installed_hooks = self.paths.hooks.read_bytes()
+
+        with self.assertRaisesRegex(GateError, "simulated config/read failure"):
+            manager.uninstall()
+
+        self.assertEqual(
+            rpc.hook_state[target_key],
+            {"trusted_hash": "sha256:gate-hook-hash"},
+        )
+        self.assertEqual(rpc.hook_state[unrelated_key], {"enabled": False})
+        self.assertEqual(self.paths.agents.read_bytes(), installed_agents)
+        self.assertEqual(self.paths.hooks.read_bytes(), installed_hooks)
+        self.assertTrue(self.paths.target_hook.exists())
+        self.assertTrue(self.paths.state.exists())
+
     def test_rollback_restores_exact_preinstall_snapshot(self) -> None:
         original_agents_bytes = self.paths.agents.read_bytes()
         original_hooks_bytes = self.paths.hooks.read_bytes()
@@ -293,6 +464,253 @@ class GlobalGateManagerTests(unittest.TestCase):
         self.assertEqual(self.paths.hooks.read_bytes(), original_hooks_bytes)
         self.assertFalse(self.paths.target_hook.exists())
         self.assertFalse(self.paths.state.exists())
+
+    def test_rollback_restores_target_trust_without_touching_unrelated_state(self) -> None:
+        target_key = f"{self.paths.hooks}:user_prompt_submit:0:0"
+        unrelated_key = f"{self.paths.hooks}:stop:0:0"
+        rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="untrusted",
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="trusted",
+                ),
+            ],
+            hook_state={unrelated_key: {"enabled": False}},
+            config_path=self.paths.config,
+        )
+        manager = GlobalGateManager(self.paths, rpc_factory=lambda: rpc)
+        installed = manager.install(trust=True)
+
+        manager.rollback(installed.backup_id)
+
+        self.assertNotIn(target_key, rpc.hook_state)
+        self.assertEqual(rpc.hook_state, {unrelated_key: {"enabled": False}})
+        self.assertEqual(self.paths.agents.read_text(encoding="utf-8"), self.original_agents)
+
+    def test_rollback_migrates_legacy_install_backup_without_trust_metadata(self) -> None:
+        target_key = f"{self.paths.hooks}:user_prompt_submit:0:0"
+        unrelated_key = f"{self.paths.hooks}:stop:0:0"
+        rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="untrusted",
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="trusted",
+                ),
+            ],
+            hook_state={unrelated_key: {"enabled": False}},
+            config_path=self.paths.config,
+        )
+        manager = GlobalGateManager(self.paths, rpc_factory=lambda: rpc)
+        installed = manager.install(trust=True)
+        snapshot_path = self.paths.backup_root / installed.backup_id / "snapshot.json"
+        legacy_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        legacy_snapshot.pop("hook_trust")
+        snapshot_path.write_text(json.dumps(legacy_snapshot), encoding="utf-8")
+
+        manager.rollback(installed.backup_id)
+
+        self.assertNotIn(target_key, rpc.hook_state)
+        self.assertEqual(rpc.hook_state, {unrelated_key: {"enabled": False}})
+        self.assertFalse(self.paths.target_hook.exists())
+        self.assertFalse(self.paths.state.exists())
+
+    def test_install_safely_upgrades_owned_hook_from_recorded_old_hash(self) -> None:
+        manager = self.manager_with_trusted_rpc()
+        installed = manager.install(trust=False)
+        old_target = self.paths.target_hook.read_bytes()
+        old_state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        self.source.write_text("#!/usr/bin/env python3\nprint('{\"v\": 2}')\n", encoding="utf-8")
+
+        upgraded = self.manager_with_trusted_rpc().install(trust=False)
+
+        self.assertTrue(upgraded.changed)
+        self.assertNotEqual(self.paths.target_hook.read_bytes(), old_target)
+        self.assertEqual(self.paths.target_hook.read_bytes(), self.source.read_bytes())
+        new_state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        self.assertEqual(
+            new_state["upgraded_from_target_sha256"], old_state["target_sha256"]
+        )
+        self.assertNotEqual(new_state["target_sha256"], old_state["target_sha256"])
+        self.assertIsNotNone(installed.backup_id)
+
+    def test_trusted_upgrade_migrates_legacy_restore_state_without_stale_hash(self) -> None:
+        target_key = f"{self.paths.hooks}:user_prompt_submit:0:0"
+        old_hash = "sha256:gate-hook-hash"
+        initial_rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="untrusted",
+                    current_hash=old_hash,
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="trusted",
+                    current_hash=old_hash,
+                ),
+            ],
+            config_path=self.paths.config,
+        )
+        GlobalGateManager(self.paths, rpc_factory=lambda: initial_rpc).install(
+            trust=True
+        )
+        legacy_state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        for key in ("hook_key", "trust_managed", "trust_restore"):
+            legacy_state.pop(key, None)
+        self.paths.state.write_text(json.dumps(legacy_state), encoding="utf-8")
+        self.source.write_text("#!/usr/bin/env python3\nprint('v2')\n", encoding="utf-8")
+        new_hash = "sha256:new-gate-hook-hash"
+        upgrade_rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="modified",
+                    current_hash=new_hash,
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="modified",
+                    current_hash=new_hash,
+                ),
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="trusted",
+                    current_hash=new_hash,
+                ),
+            ],
+            hook_state={target_key: {"trusted_hash": old_hash}},
+            config_path=self.paths.config,
+        )
+
+        GlobalGateManager(self.paths, rpc_factory=lambda: upgrade_rpc).install(
+            trust=True
+        )
+
+        state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        self.assertTrue(state["trust_managed"])
+        self.assertTrue(state["trust_restore_inferred_legacy"])
+        self.assertEqual(
+            state["trust_restore"],
+            {"key": target_key, "exists": False, "value": None},
+        )
+        self.assertEqual(
+            upgrade_rpc.hook_state[target_key], {"trusted_hash": new_hash}
+        )
+
+    def test_install_rejects_upgrade_when_installed_target_drifted(self) -> None:
+        self.manager_with_trusted_rpc().install(trust=False)
+        self.paths.target_hook.write_text("user changed target\n", encoding="utf-8")
+        self.paths.target_hook.chmod(0o700)
+        self.source.write_text("#!/usr/bin/env python3\nprint('v2')\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(GateError, "安装状态哈希"):
+            self.manager_with_trusted_rpc().install(trust=False)
+
+    def test_hook_key_position_drift_fails_closed_everywhere(self) -> None:
+        self.manager_with_trusted_rpc().install(trust=False)
+        before = {
+            path: path.read_bytes()
+            for path in (
+                self.paths.agents,
+                self.paths.hooks,
+                self.paths.target_hook,
+                self.paths.state,
+            )
+        }
+        drifted_key = f"{self.paths.hooks}:user_prompt_submit:1:0"
+        drifted_rpc = FakeRpc(
+            [
+                hook_listing(
+                    hooks_path=self.paths.hooks,
+                    command=self.paths.hook_command,
+                    trust_status="untrusted",
+                    hook_key=drifted_key,
+                )
+            ],
+            config_path=self.paths.config,
+        )
+        manager = GlobalGateManager(self.paths, rpc_factory=lambda: drifted_rpc)
+
+        with self.assertRaisesRegex(GateError, "Hook key 漂移"):
+            manager.install(trust=True)
+        report = manager.check(require_trust=True)
+        self.assertFalse(report.ok)
+        self.assertIn("Hook key 漂移", "\n".join(report.issues))
+        with self.assertRaisesRegex(GateError, "Hook key 漂移"):
+            manager.uninstall()
+
+        self.assertFalse(
+            any(method == "config/batchWrite" for method, _ in drifted_rpc.calls)
+        )
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_uninstall_uses_installed_hash_when_repository_source_changed(self) -> None:
+        self.manager_with_trusted_rpc().install(trust=False)
+        self.source.write_text("#!/usr/bin/env python3\nprint('future v2')\n", encoding="utf-8")
+
+        result = self.manager_with_trusted_rpc().uninstall()
+
+        self.assertTrue(result.changed)
+        self.assertFalse(self.paths.target_hook.exists())
+        self.assertFalse(self.paths.state.exists())
+
+    def test_rollback_dry_run_validates_snapshot_structure(self) -> None:
+        installed = self.manager_with_trusted_rpc().install(trust=False)
+        snapshot_path = self.paths.backup_root / installed.backup_id / "snapshot.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot["files"].pop()
+        snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaisesRegex(GateError, "不完整"):
+            GlobalGateManager(self.paths).rollback(
+                installed.backup_id, dry_run=True
+            )
+
+    def test_rollback_rejects_backup_trust_key_from_another_hooks_file(self) -> None:
+        installed = self.manager_with_trusted_rpc().install(trust=False)
+        snapshot_path = self.paths.backup_root / installed.backup_id / "snapshot.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot["hook_trust"] = {
+            "key": "/tmp/other-hooks.json:user_prompt_submit:0:0",
+            "exists": False,
+            "value": None,
+        }
+        snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaisesRegex(GateError, "不属于当前模型路由门"):
+            GlobalGateManager(self.paths).rollback(installed.backup_id)
+
+    def test_rollback_rejects_wrong_index_in_same_hooks_file(self) -> None:
+        installed = self.manager_with_trusted_rpc().install(trust=False)
+        snapshot_path = self.paths.backup_root / installed.backup_id / "snapshot.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot["hook_trust"] = {
+            "key": f"{self.paths.hooks}:user_prompt_submit:9:0",
+            "exists": False,
+            "value": None,
+        }
+        snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaisesRegex(GateError, "Hook key 漂移"):
+            GlobalGateManager(self.paths).rollback(installed.backup_id)
 
     def test_install_requires_source_and_check_reports_missing_source(self) -> None:
         self.source.unlink()
@@ -370,7 +788,7 @@ class HookTrustTests(unittest.TestCase):
         )
         rpc = FakeRpc([before, after])
 
-        metadata = ensure_hook_trusted(
+        result = ensure_hook_trusted(
             rpc,
             cwd=Path("/tmp/project"),
             hooks_path=hooks_path,
@@ -378,23 +796,27 @@ class HookTrustTests(unittest.TestCase):
             command=command,
         )
 
-        self.assertEqual(metadata["trustStatus"], "trusted")
+        self.assertEqual(result.metadata["trustStatus"], "trusted")
+        self.assertTrue(result.changed)
+        self.assertIsNotNone(result.original)
         methods = [method for method, _ in rpc.calls]
-        self.assertEqual(methods, ["hooks/list", "config/batchWrite", "hooks/list"])
-        params = rpc.calls[1][1]
+        self.assertEqual(
+            methods,
+            ["hooks/list", "config/read", "config/batchWrite", "hooks/list"],
+        )
+        params = rpc.calls[2][1]
         self.assertEqual(params["filePath"], "/tmp/codex-home/config.toml")
         self.assertTrue(params["reloadUserConfig"])
         self.assertEqual(len(params["edits"]), 1)
         edit = params["edits"][0]
-        self.assertEqual(edit["keyPath"], "hooks.state")
-        self.assertEqual(edit["mergeStrategy"], "upsert")
+        self.assertEqual(
+            edit["keyPath"],
+            'hooks.state."/tmp/codex-home/hooks.json:user_prompt_submit:0:0"',
+        )
+        self.assertEqual(edit["mergeStrategy"], "replace")
         self.assertEqual(
             edit["value"],
-            {
-                f"{hooks_path}:user_prompt_submit:1:0": {
-                    "trusted_hash": "sha256:gate-hook-hash"
-                }
-            },
+            {"trusted_hash": "sha256:gate-hook-hash"},
         )
         self.assertNotIn("sha256:do-not-trust-this", json.dumps(edit))
 

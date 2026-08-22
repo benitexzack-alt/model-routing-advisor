@@ -173,6 +173,29 @@ class CheckReport:
         }
 
 
+@dataclass(frozen=True)
+class HookTrustSnapshot:
+    """Exact user-layer value for one hook trust key."""
+
+    key: str
+    exists: bool
+    value: Optional[Dict[str, Any]] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "key": self.key,
+            "exists": self.exists,
+            "value": copy.deepcopy(self.value) if self.exists else None,
+        }
+
+
+@dataclass(frozen=True)
+class HookTrustResult:
+    metadata: Dict[str, Any]
+    changed: bool
+    original: Optional[HookTrustSnapshot] = None
+
+
 def _reject_symlink(path: Path) -> None:
     if path.is_symlink():
         raise GateError("拒绝修改符号链接：%s" % path)
@@ -512,46 +535,253 @@ def inspect_hook(
     return _find_hook_metadata(response, hooks_path, command)
 
 
+def _validate_owned_hook_key(hooks_path: Path, key: str) -> None:
+    prefix = "%s:user_prompt_submit:" % hooks_path.expanduser().absolute()
+    if not isinstance(key, str) or not key.startswith(prefix):
+        raise GateError("Hook 信任 key 不属于当前模型路由门：%s" % key)
+    position = key[len(prefix) :].split(":")
+    if len(position) != 2 or not all(part.isdigit() for part in position):
+        raise GateError("Hook 信任 key 位置格式无效：%s" % key)
+
+
+def _validate_hook_key_lineage(state: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+    recorded = state.get("hook_key")
+    current = metadata.get("key")
+    if recorded is not None and recorded != current:
+        raise GateError("Hook key 漂移，需迁移/重新安装")
+
+
+def _user_hook_state(
+    rpc: Any, cwd: Path, config_path: Path
+) -> tuple:
+    """Read the raw user-layer hooks.state and its optimistic-lock version."""
+    response = rpc.call(
+        "config/read", {"includeLayers": True, "cwd": str(cwd)}
+    )
+    layers = response.get("layers")
+    if not isinstance(layers, list):
+        raise GateError("config/read 未返回配置分层")
+    expected_path = config_path.expanduser().resolve()
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        name = layer.get("name")
+        if not isinstance(name, dict) or name.get("type") != "user":
+            continue
+        if name.get("profile") is not None:
+            continue
+        file_value = name.get("file")
+        if not isinstance(file_value, str):
+            continue
+        if Path(file_value).expanduser().resolve() != expected_path:
+            continue
+        version = layer.get("version")
+        if not isinstance(version, str) or not version:
+            raise GateError("config/read 的用户配置版本无效")
+        config = layer.get("config")
+        if not isinstance(config, dict):
+            raise GateError("config/read 的用户配置层无效")
+        hooks = config.get("hooks") or {}
+        if not isinstance(hooks, dict):
+            raise GateError("用户配置 hooks 字段必须是对象")
+        state = hooks.get("state") or {}
+        if not isinstance(state, dict):
+            raise GateError("用户配置 hooks.state 字段必须是对象")
+        return copy.deepcopy(state), version
+    # A missing user layer means config.toml did not exist yet.
+    return {}, None
+
+
+def _hook_state_key_path(key: str) -> str:
+    # Quoting makes dots and punctuation in the opaque hook key one segment.
+    return "hooks.state.%s" % json.dumps(key, ensure_ascii=False)
+
+
+def _write_hook_trust_snapshot(
+    rpc: Any,
+    cwd: Path,
+    config_path: Path,
+    snapshot: HookTrustSnapshot,
+    expected_current: Optional[Dict[str, Any]],
+) -> None:
+    """Restore one trust entry without replacing unrelated hooks.state keys."""
+    state, version = _user_hook_state(rpc, cwd, config_path)
+    previous = HookTrustSnapshot(
+        snapshot.key,
+        snapshot.key in state,
+        copy.deepcopy(state.get(snapshot.key)) if snapshot.key in state else None,
+    )
+    if snapshot.exists:
+        if snapshot.key in state and state.get(snapshot.key) == snapshot.value:
+            return
+    elif snapshot.key not in state:
+        return
+    current = state.get(snapshot.key)
+    if current != expected_current:
+        raise GateError("目标 Hook 信任项已被并发修改；拒绝覆盖")
+    params: Dict[str, Any] = {
+        "edits": [
+            {
+                "keyPath": _hook_state_key_path(snapshot.key),
+                "value": copy.deepcopy(snapshot.value) if snapshot.exists else None,
+                "mergeStrategy": "replace",
+            }
+        ],
+        "filePath": str(config_path),
+        "reloadUserConfig": True,
+    }
+    if version is not None:
+        params["expectedVersion"] = version
+    try:
+        response = rpc.call("config/batchWrite", params)
+        if response.get("status") not in {"ok", "okOverridden"}:
+            raise GateError("config/batchWrite 未成功恢复 Hook 信任")
+        restored, _ = _user_hook_state(rpc, cwd, config_path)
+        if snapshot.exists:
+            if (
+                snapshot.key not in restored
+                or restored.get(snapshot.key) != snapshot.value
+            ):
+                raise GateError("目标 Hook 信任项未精确恢复")
+        elif snapshot.key in restored:
+            raise GateError("目标 Hook 信任项未删除")
+    except Exception as error:
+        try:
+            rollback_state, rollback_version = _user_hook_state(
+                rpc, cwd, config_path
+            )
+            previous_is_current = (
+                previous.key in rollback_state
+                and rollback_state.get(previous.key) == previous.value
+                if previous.exists
+                else previous.key not in rollback_state
+            )
+            desired_is_current = (
+                snapshot.key in rollback_state
+                and rollback_state.get(snapshot.key) == snapshot.value
+                if snapshot.exists
+                else snapshot.key not in rollback_state
+            )
+            if not previous_is_current:
+                if not desired_is_current:
+                    raise GateError("目标 Hook 信任项在失败恢复中被并发修改")
+                rollback_params: Dict[str, Any] = {
+                    "edits": [
+                        {
+                            "keyPath": _hook_state_key_path(previous.key),
+                            "value": copy.deepcopy(previous.value)
+                            if previous.exists
+                            else None,
+                            "mergeStrategy": "replace",
+                        }
+                    ],
+                    "filePath": str(config_path),
+                    "reloadUserConfig": True,
+                }
+                if rollback_version is not None:
+                    rollback_params["expectedVersion"] = rollback_version
+                rollback_response = rpc.call("config/batchWrite", rollback_params)
+                if rollback_response.get("status") not in {"ok", "okOverridden"}:
+                    raise GateError("config/batchWrite 未成功回退 Hook 信任")
+                verified, _ = _user_hook_state(rpc, cwd, config_path)
+                if previous.exists:
+                    if (
+                        previous.key not in verified
+                        or verified.get(previous.key) != previous.value
+                    ):
+                        raise GateError("目标 Hook 原信任项未恢复")
+                elif previous.key in verified:
+                    raise GateError("新增的目标 Hook 信任项未回退")
+        except Exception as rollback_error:
+            raise GateError(
+                "目标 Hook 信任项写入失败且事务回退失败：%s；原错误：%s"
+                % (rollback_error, error)
+            )
+        raise
+
+
 def ensure_hook_trusted(
     rpc: Any,
     cwd: Path,
     hooks_path: Path,
     config_path: Path,
     command: str,
-) -> Dict[str, Any]:
+    expected_key: Optional[str] = None,
+) -> HookTrustResult:
     """Trust exactly the target hook hash through config/batchWrite, then verify."""
     metadata = inspect_hook(rpc, cwd, hooks_path, command)
+    if expected_key is not None and metadata.get("key") != expected_key:
+        raise GateError("Hook key 漂移，需迁移/重新安装")
     current_hash = metadata.get("currentHash")
     if not isinstance(current_hash, str) or not current_hash.startswith("sha256:"):
         raise GateError("目标 Hook 的 currentHash 无效")
+    metadata_key = metadata.get("key")
+    if not isinstance(metadata_key, str) or not metadata_key:
+        raise GateError("目标 Hook 缺少可持久化的 key")
+    _validate_owned_hook_key(hooks_path, metadata_key)
     if metadata.get("trustStatus") != "trusted":
         hook_key = metadata.get("key")
-        if not isinstance(hook_key, str) or not hook_key:
-            raise GateError("目标 Hook 缺少可持久化的 key")
-        response = rpc.call(
-            "config/batchWrite",
-            {
-                "edits": [
-                    {
-                        "keyPath": "hooks.state",
-                        "value": {hook_key: {"trusted_hash": current_hash}},
-                        "mergeStrategy": "upsert",
-                    }
-                ],
-                "filePath": str(config_path),
-                "reloadUserConfig": True,
-            },
+        assert isinstance(hook_key, str)
+        state, version = _user_hook_state(rpc, cwd, config_path)
+        original = HookTrustSnapshot(
+            key=hook_key,
+            exists=hook_key in state,
+            value=copy.deepcopy(state.get(hook_key)) if hook_key in state else None,
         )
-        if response.get("status") not in {"ok", "okOverridden"}:
-            raise GateError("config/batchWrite 未成功保存 Hook 信任")
-        metadata = inspect_hook(rpc, cwd, hooks_path, command)
+        trusted_value = {"trusted_hash": current_hash}
+        params: Dict[str, Any] = {
+            "edits": [
+                {
+                    "keyPath": _hook_state_key_path(hook_key),
+                    "value": trusted_value,
+                    "mergeStrategy": "replace",
+                }
+            ],
+            "filePath": str(config_path),
+            "reloadUserConfig": True,
+        }
+        if version is not None:
+            params["expectedVersion"] = version
+        write_attempted = False
+        try:
+            write_attempted = True
+            response = rpc.call("config/batchWrite", params)
+            if response.get("status") not in {"ok", "okOverridden"}:
+                raise GateError("config/batchWrite 未成功保存 Hook 信任")
+            metadata = inspect_hook(rpc, cwd, hooks_path, command)
+            if metadata.get("trustStatus") != "trusted":
+                raise GateError(
+                    "目标 Hook 信任状态不是 trusted：%s"
+                    % metadata.get("trustStatus")
+                )
+            if metadata.get("enabled") is not True:
+                raise GateError("目标 Hook enabled=false")
+            if metadata.get("currentHash") != current_hash:
+                raise GateError("目标 Hook 在信任过程中发生配置变化")
+        except Exception as error:
+            if write_attempted:
+                try:
+                    _write_hook_trust_snapshot(
+                        rpc,
+                        cwd,
+                        config_path,
+                        original,
+                        expected_current=trusted_value,
+                    )
+                except Exception as restore_error:
+                    raise GateError(
+                        "Hook 信任失败，且原信任项恢复失败：%s；原错误：%s"
+                        % (restore_error, error)
+                    )
+            raise
+        return HookTrustResult(metadata=metadata, changed=True, original=original)
     if metadata.get("trustStatus") != "trusted":
         raise GateError("目标 Hook 信任状态不是 trusted：%s" % metadata.get("trustStatus"))
     if metadata.get("enabled") is not True:
         raise GateError("目标 Hook enabled=false")
     if metadata.get("currentHash") != current_hash:
         raise GateError("目标 Hook 在信任过程中发生配置变化")
-    return metadata
+    return HookTrustResult(metadata=metadata, changed=False)
 
 
 class GlobalGateManager:
@@ -590,27 +820,66 @@ class GlobalGateManager:
             raise GateError("源码 Hook 不能由系统 Python 3.9 解析：%s" % detail)
         return data
 
-    def _validate_existing_target(self, source_data: bytes) -> None:
+    def _validate_existing_target(
+        self,
+        source_data: bytes,
+        existing_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
         target = self.paths.target_hook
         if not target.exists():
+            if existing_state is not None:
+                raise GateError("安装状态存在但目标 Hook 已缺失：%s" % target)
             return
         _reject_symlink(target)
         if not target.is_file():
             raise GateError("目标 Hook 不是普通文件：%s" % target)
-        if sha256_bytes(target.read_bytes()) != sha256_bytes(source_data):
-            raise GateError("目标 Hook 与源码 Hook 哈希不匹配；拒绝覆盖")
+        target_hash = sha256_bytes(target.read_bytes())
+        if target_hash != sha256_bytes(source_data):
+            if existing_state is None:
+                raise GateError("目标 Hook 与源码 Hook 哈希不匹配；拒绝覆盖")
+            self._validate_state_identity(existing_state)
+            if target_hash != existing_state.get("target_sha256"):
+                raise GateError("目标 Hook 与安装状态哈希不匹配；拒绝升级")
         if not os.access(str(target), os.X_OK):
             raise GateError("目标 Hook 不可执行：%s" % target)
 
-    def _desired_install(self, source_data: bytes) -> Dict[Path, Optional[bytes]]:
+    def _desired_install(
+        self,
+        source_data: bytes,
+        existing_state: Optional[Dict[str, Any]],
+    ) -> Dict[Path, Optional[bytes]]:
         agents_text = _read_text_or_empty(self.paths.agents)
         hooks_config = _load_hooks(self.paths.hooks)
         desired_agents = render_agents_install(agents_text, self.paths.agents_block)
         desired_hooks = render_hooks_install(hooks_config, self.paths)
-        existing_state = self._load_state(required=False)
         if existing_state is not None:
-            self._validate_state(existing_state, source_data)
-        state = existing_state or self._new_state(source_data)
+            self._validate_state_identity(existing_state)
+        if (
+            existing_state is not None
+            and existing_state.get("source_sha256") == sha256_bytes(source_data)
+            and existing_state.get("target_sha256") == sha256_bytes(source_data)
+        ):
+            state = existing_state
+        else:
+            state = self._new_state(source_data)
+            if existing_state is not None:
+                state["installed_at"] = existing_state.get(
+                    "installed_at", state["installed_at"]
+                )
+                state["upgraded_at"] = datetime.now(timezone.utc).isoformat()
+                state["upgraded_from_target_sha256"] = existing_state.get(
+                    "target_sha256"
+                )
+                for key in (
+                    "hook_current_hash",
+                    "trust_status",
+                    "hook_key",
+                    "trust_managed",
+                    "trust_restore",
+                    "trust_restore_inferred_legacy",
+                ):
+                    if key in existing_state:
+                        state[key] = copy.deepcopy(existing_state[key])
         return {
             self.paths.agents: desired_agents.encode("utf-8"),
             self.paths.hooks: _json_bytes(desired_hooks),
@@ -653,14 +922,22 @@ class GlobalGateManager:
         return state
 
     def _validate_state(self, state: Dict[str, Any], source_data: bytes) -> None:
+        self._validate_state_identity(state)
         expected = self._new_state(source_data)
+        for key in (
+            "source_sha256",
+            "target_sha256",
+        ):
+            if state.get(key) != expected.get(key):
+                raise GateError("全局门状态或配置变化：%s" % key)
+
+    def _validate_state_identity(self, state: Dict[str, Any]) -> None:
+        expected = self._new_state(b"identity-placeholder")
         for key in (
             "schema_version",
             "gate_id",
             "source_hook",
-            "source_sha256",
             "target_hook",
-            "target_sha256",
             "agents_path",
             "agents_block_sha256",
             "hooks_path",
@@ -669,6 +946,10 @@ class GlobalGateManager:
         ):
             if state.get(key) != expected.get(key):
                 raise GateError("全局门状态或配置变化：%s" % key)
+        for key in ("source_sha256", "target_sha256"):
+            value = state.get(key)
+            if not isinstance(value, str) or not value.startswith("sha256:"):
+                raise GateError("全局门状态哈希无效：%s" % key)
 
     def _changed_paths(self, desired: Dict[Path, Optional[bytes]]) -> List[Path]:
         changed = []
@@ -688,7 +969,9 @@ class GlobalGateManager:
             self.paths.state,
         ]
 
-    def _create_backup(self, action: str) -> str:
+    def _create_backup(
+        self, action: str, hook_trust: Optional[HookTrustSnapshot] = None
+    ) -> str:
         for path in self._snapshot_paths():
             _reject_symlink(path)
         backup_id = "%s-%s-%s" % (
@@ -709,6 +992,8 @@ class GlobalGateManager:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "files": [],
         }
+        if hook_trust is not None:
+            snapshot["hook_trust"] = hook_trust.as_dict()
         try:
             for path in self._snapshot_paths():
                 exists = path.exists()
@@ -728,6 +1013,141 @@ class GlobalGateManager:
             shutil.rmtree(str(pending), ignore_errors=True)
             raise
         return backup_id
+
+    def _expected_hook_key_from_snapshot(
+        self, entries: List[Dict[str, Any]]
+    ) -> str:
+        hooks_entry = next(
+            (
+                entry
+                for entry in entries
+                if entry.get("path") == str(self.paths.hooks)
+            ),
+            None,
+        )
+        if not isinstance(hooks_entry, dict):
+            raise GateError("备份缺少 hooks.json 记录")
+        if hooks_entry.get("exists") is True:
+            try:
+                hooks_config = json.loads(
+                    base64.b64decode(
+                        hooks_entry["content_base64"], validate=True
+                    ).decode("utf-8")
+                )
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise GateError("备份 hooks.json 无效：%s" % error)
+            if not isinstance(hooks_config, dict):
+                raise GateError("备份 hooks.json 顶层必须是对象")
+        else:
+            hooks_config = {}
+        desired = render_hooks_install(hooks_config, self.paths)
+        groups = desired.get("hooks", {}).get("UserPromptSubmit", [])
+        matches = [
+            index for index, group in enumerate(groups) if group == self.paths.hook_group
+        ]
+        if len(matches) != 1:
+            raise GateError("备份无法定位唯一模型路由 Hook")
+        return "%s:user_prompt_submit:%d:0" % (
+            self.paths.hooks,
+            matches[0],
+        )
+
+    def _load_backup_snapshot(self, backup_id: str) -> Dict[str, Any]:
+        if (
+            not backup_id
+            or Path(backup_id).name != backup_id
+            or backup_id.startswith(".")
+        ):
+            raise GateError("备份编号无效：%s" % backup_id)
+        snapshot_path = self.paths.backup_root / backup_id / "snapshot.json"
+        if not snapshot_path.exists() or not snapshot_path.is_file():
+            raise GateError("找不到备份：%s" % backup_id)
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise GateError("备份清单无效：%s" % error)
+        if not isinstance(snapshot, dict) or snapshot.get("gate_id") != GATE_ID:
+            raise GateError("备份不属于当前模型路由门")
+        allowed = {str(path) for path in self._snapshot_paths()}
+        entries = snapshot.get("files")
+        if not isinstance(entries, list):
+            raise GateError("备份缺少文件清单")
+        seen = set()
+        for entry in entries:
+            path_text = entry.get("path") if isinstance(entry, dict) else None
+            if path_text not in allowed:
+                raise GateError("备份包含越界路径：%s" % path_text)
+            if path_text in seen:
+                raise GateError("备份包含重复路径：%s" % path_text)
+            seen.add(path_text)
+            exists = entry.get("exists")
+            mode = entry.get("mode")
+            encoded = entry.get("content_base64")
+            if not isinstance(exists, bool):
+                raise GateError("备份文件存在状态无效：%s" % path_text)
+            if exists:
+                if not isinstance(mode, int) or mode < 0 or mode > 0o7777:
+                    raise GateError("备份文件权限无效：%s" % path_text)
+                if not isinstance(encoded, str):
+                    raise GateError("备份文件内容缺失：%s" % path_text)
+                try:
+                    base64.b64decode(encoded, validate=True)
+                except (ValueError, TypeError) as error:
+                    raise GateError("备份文件内容无效：%s" % error)
+            elif mode is not None or encoded is not None:
+                raise GateError("不存在的备份文件不应包含内容：%s" % path_text)
+        if seen != allowed:
+            raise GateError("备份文件清单不完整")
+        trust = snapshot.get("hook_trust")
+        if trust is not None:
+            if not isinstance(trust, dict):
+                raise GateError("备份 Hook 信任记录无效")
+            key = trust.get("key")
+            exists = trust.get("exists")
+            value = trust.get("value")
+            if not isinstance(key, str) or not key or not isinstance(exists, bool):
+                raise GateError("备份 Hook 信任记录不完整")
+            _validate_owned_hook_key(self.paths.hooks, key)
+            expected_key = self._expected_hook_key_from_snapshot(entries)
+            if key != expected_key:
+                raise GateError("Hook key 漂移，需迁移/重新安装")
+            if exists and not isinstance(value, dict):
+                raise GateError("备份 Hook 信任值无效")
+            if not exists and value is not None:
+                raise GateError("备份 Hook 信任空值无效")
+            state_entry = next(
+                (
+                    entry
+                    for entry in entries
+                    if entry.get("path") == str(self.paths.state)
+                ),
+                None,
+            )
+            if isinstance(state_entry, dict) and state_entry.get("exists") is True:
+                try:
+                    state_value = json.loads(
+                        base64.b64decode(
+                            state_entry["content_base64"], validate=True
+                        ).decode("utf-8")
+                    )
+                except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise GateError("备份全局门状态无效：%s" % error)
+                recorded_key = (
+                    state_value.get("hook_key")
+                    if isinstance(state_value, dict)
+                    else None
+                )
+                if recorded_key is not None and recorded_key != key:
+                    raise GateError("Hook key 漂移，需迁移/重新安装")
+        return snapshot
+
+    def _attach_backup_trust(
+        self, backup_id: str, hook_trust: HookTrustSnapshot
+    ) -> None:
+        snapshot = self._load_backup_snapshot(backup_id)
+        snapshot["hook_trust"] = hook_trust.as_dict()
+        snapshot_path = self.paths.backup_root / backup_id / "snapshot.json"
+        atomic_write(snapshot_path, _json_bytes(snapshot), 0o600)
 
     def _apply_desired(self, desired: Dict[Path, Optional[bytes]]) -> None:
         for path, data in desired.items():
@@ -752,7 +1172,9 @@ class GlobalGateManager:
         else:
             yield client
 
-    def _inspect_or_trust(self, trust: bool) -> Dict[str, Any]:
+    def _inspect_or_trust(
+        self, trust: bool, state: Optional[Dict[str, Any]] = None
+    ) -> HookTrustResult:
         with self._rpc() as rpc:
             if trust:
                 return ensure_hook_trusted(
@@ -761,24 +1183,77 @@ class GlobalGateManager:
                     hooks_path=self.paths.hooks,
                     config_path=self.paths.config,
                     command=self.paths.hook_command,
+                    expected_key=state.get("hook_key")
+                    if isinstance(state, dict)
+                    else None,
                 )
-            return inspect_hook(
+            metadata = inspect_hook(
                 rpc,
                 cwd=self.paths.repo_root,
                 hooks_path=self.paths.hooks,
                 command=self.paths.hook_command,
             )
+            _validate_owned_hook_key(self.paths.hooks, metadata.get("key"))
+            if isinstance(state, dict):
+                _validate_hook_key_lineage(state, metadata)
+            return HookTrustResult(metadata=metadata, changed=False)
+
+    def _restore_trust_snapshot(
+        self,
+        snapshot: HookTrustSnapshot,
+        expected_current: Optional[Dict[str, Any]],
+    ) -> None:
+        with self._rpc() as rpc:
+            _write_hook_trust_snapshot(
+                rpc,
+                self.paths.repo_root,
+                self.paths.config,
+                snapshot,
+                expected_current,
+            )
+
+    @staticmethod
+    def _trust_snapshot_from_dict(value: Any) -> Optional[HookTrustSnapshot]:
+        if not isinstance(value, dict):
+            return None
+        key = value.get("key")
+        exists = value.get("exists")
+        item = value.get("value")
+        if not isinstance(key, str) or not key or not isinstance(exists, bool):
+            raise GateError("全局门信任恢复状态无效")
+        if exists and not isinstance(item, dict):
+            raise GateError("全局门信任恢复值无效")
+        if not exists and item is not None:
+            raise GateError("全局门信任恢复空值无效")
+        return HookTrustSnapshot(key, exists, copy.deepcopy(item))
 
     def install(self, dry_run: bool = False, trust: bool = False) -> OperationResult:
         source_data = self._validate_source()
-        self._validate_existing_target(source_data)
-        desired = self._desired_install(source_data)
+        existing_state = self._load_state(required=False)
+        self._validate_existing_target(source_data, existing_state)
+        desired = self._desired_install(source_data, existing_state)
+        pretrust_metadata = None
+        if existing_state is not None:
+            pretrust_metadata = self._inspect_or_trust(
+                False, existing_state
+            ).metadata
         changed_paths = self._changed_paths(desired)
         if dry_run:
             return OperationResult("install", bool(changed_paths), dry_run=True)
 
+        trust_needs_backup = False
+        if trust and not changed_paths:
+            trust_needs_backup = (
+                (pretrust_metadata or {}).get("trustStatus")
+                != "trusted"
+            )
+        state_needs_trust_migration = (
+            trust
+            and isinstance(existing_state, dict)
+            and "trust_managed" not in existing_state
+        )
         backup_id = None
-        if changed_paths:
+        if changed_paths or trust_needs_backup or state_needs_trust_migration:
             backup_id = self._create_backup("install")
             try:
                 self._apply_desired(desired)
@@ -786,26 +1261,91 @@ class GlobalGateManager:
                 self._restore_backup(backup_id)
                 raise
 
+        trust_result: Optional[HookTrustResult] = None
+        state_changed = False
         try:
-            metadata = self._inspect_or_trust(trust)
-            state = self._load_state(required=True)
-            assert state is not None
+            applied_state = self._load_state(required=True)
+            assert applied_state is not None
+            trust_result = self._inspect_or_trust(trust, applied_state)
+            metadata = trust_result.metadata
+            state = applied_state
+            previous_status = state.get("trust_status")
+            previous_hash = state.get("hook_current_hash")
+            trust_management_recorded = "trust_managed" in state
+            previously_managed_trust = state.get("trust_managed") is True
             state["hook_current_hash"] = metadata.get("currentHash")
             state["trust_status"] = metadata.get("trustStatus")
+            hook_key = metadata.get("key")
+            if isinstance(hook_key, str) and hook_key:
+                state["hook_key"] = hook_key
+            if trust_result.changed and trust_result.original is not None:
+                state["trust_managed"] = True
+                legacy_trust = (
+                    not trust_management_recorded
+                    and previous_status == "trusted"
+                    and trust_result.original.exists
+                    and trust_result.original.value
+                    == {"trusted_hash": previous_hash}
+                )
+                if legacy_trust:
+                    state["trust_restore"] = HookTrustSnapshot(
+                        trust_result.original.key, False, None
+                    ).as_dict()
+                    state["trust_restore_inferred_legacy"] = True
+                elif not previously_managed_trust:
+                    state["trust_restore"] = trust_result.original.as_dict()
+                if backup_id is not None:
+                    self._attach_backup_trust(backup_id, trust_result.original)
+            elif (
+                trust
+                and not trust_management_recorded
+                and previous_status == "trusted"
+                and previous_hash == metadata.get("currentHash")
+                and isinstance(hook_key, str)
+            ):
+                # Migration for installs made by manager versions that persisted
+                # trust but did not record its pre-install value.  The hook key is
+                # exclusively owned by this gate, so only that key is removed.
+                state["trust_managed"] = True
+                state["trust_restore"] = HookTrustSnapshot(
+                    hook_key, False, None
+                ).as_dict()
+                state["trust_restore_inferred_legacy"] = True
+            elif not trust_management_recorded:
+                state["trust_managed"] = False
             state_bytes = _json_bytes(state)
             if self.paths.state.read_bytes() != state_bytes:
+                state_changed = True
                 atomic_write(
                     self.paths.state,
                     state_bytes,
                     _existing_mode(self.paths.state, default=0o600),
                 )
-        except Exception:
+        except Exception as error:
+            restore_error = None
+            if (
+                trust_result is not None
+                and trust_result.changed
+                and trust_result.original is not None
+            ):
+                try:
+                    self._restore_trust_snapshot(
+                        trust_result.original,
+                        {"trusted_hash": trust_result.metadata.get("currentHash")},
+                    )
+                except Exception as caught:
+                    restore_error = caught
             if backup_id is not None:
                 self._restore_backup(backup_id)
+            if restore_error is not None:
+                raise GateError(
+                    "安装失败，且目标 Hook 信任项恢复失败：%s；原错误：%s"
+                    % (restore_error, error)
+                )
             raise
         return OperationResult(
             "install",
-            bool(changed_paths),
+            bool(changed_paths or trust_result.changed or state_changed),
             backup_id=backup_id,
             trust_status=metadata.get("trustStatus"),
         )
@@ -860,14 +1400,14 @@ class GlobalGateManager:
         trust_status = None
         current_hash = None
         try:
-            metadata = self._inspect_or_trust(False)
+            state = self._load_state(required=False)
+            metadata = self._inspect_or_trust(False, state).metadata
             trust_status = metadata.get("trustStatus")
             current_hash = metadata.get("currentHash")
             if metadata.get("enabled") is not True:
                 issues.append("目标 Hook enabled=false")
             if require_trust and trust_status != "trusted":
                 issues.append("目标 Hook trustStatus=%s" % trust_status)
-            state = self._load_state(required=False)
             if state is not None and state.get("hook_current_hash") not in {
                 None,
                 current_hash,
@@ -883,11 +1423,18 @@ class GlobalGateManager:
         )
 
     def uninstall(self, dry_run: bool = False) -> OperationResult:
-        source_data = self._validate_source()
-        self._validate_existing_target(source_data)
         state = self._load_state(required=True)
         assert state is not None
-        self._validate_state(state, source_data)
+        self._validate_state_identity(state)
+        metadata = self._inspect_or_trust(False, state).metadata
+        target = self.paths.target_hook
+        if not target.exists() or not target.is_file():
+            raise GateError("安装状态存在但目标 Hook 已缺失：%s" % target)
+        _reject_symlink(target)
+        if sha256_bytes(target.read_bytes()) != state.get("target_sha256"):
+            raise GateError("目标 Hook 与安装状态哈希不匹配；拒绝卸载")
+        if not os.access(str(target), os.X_OK):
+            raise GateError("目标 Hook 不可执行：%s" % target)
         agents = _read_text_or_empty(self.paths.agents)
         hooks = _load_hooks(self.paths.hooks)
         desired = {
@@ -903,32 +1450,53 @@ class GlobalGateManager:
             return OperationResult("uninstall", bool(changed), dry_run=True)
         if not changed:
             return OperationResult("uninstall", False)
-        backup_id = self._create_backup("uninstall")
+        trust_restore = None
+        current_trust = None
+        if state.get("trust_managed") is True:
+            trust_restore = self._trust_snapshot_from_dict(state.get("trust_restore"))
+            if trust_restore is None:
+                raise GateError("缺少目标 Hook 的信任恢复状态")
+            recorded_key = state.get("hook_key")
+            if recorded_key != trust_restore.key or metadata.get("key") != recorded_key:
+                raise GateError("Hook key 漂移，需迁移/重新安装")
+            with self._rpc() as rpc:
+                current_state, _ = _user_hook_state(
+                    rpc, self.paths.repo_root, self.paths.config
+                )
+            current_trust = HookTrustSnapshot(
+                trust_restore.key,
+                trust_restore.key in current_state,
+                copy.deepcopy(current_state.get(trust_restore.key))
+                if trust_restore.key in current_state
+                else None,
+            )
+        backup_id = self._create_backup("uninstall", hook_trust=current_trust)
+        trust_restored = False
         try:
+            if trust_restore is not None:
+                expected = (
+                    copy.deepcopy(current_trust.value)
+                    if current_trust is not None and current_trust.exists
+                    else None
+                )
+                self._restore_trust_snapshot(trust_restore, expected)
+                trust_restored = True
             self._apply_desired(desired)
         except Exception:
             self._restore_backup(backup_id)
+            if trust_restored and current_trust is not None:
+                expected = (
+                    copy.deepcopy(trust_restore.value)
+                    if trust_restore is not None and trust_restore.exists
+                    else None
+                )
+                self._restore_trust_snapshot(current_trust, expected)
             raise
         return OperationResult("uninstall", True, backup_id=backup_id)
 
     def _restore_backup(self, backup_id: str) -> None:
-        snapshot_path = self.paths.backup_root / backup_id / "snapshot.json"
-        if not snapshot_path.exists() or not snapshot_path.is_file():
-            raise GateError("找不到备份：%s" % backup_id)
-        try:
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise GateError("备份清单无效：%s" % error)
-        if snapshot.get("gate_id") != GATE_ID:
-            raise GateError("备份不属于当前模型路由门")
-        allowed = {str(path) for path in self._snapshot_paths()}
-        entries = snapshot.get("files")
-        if not isinstance(entries, list):
-            raise GateError("备份缺少文件清单")
-        for entry in entries:
-            path_text = entry.get("path") if isinstance(entry, dict) else None
-            if path_text not in allowed:
-                raise GateError("备份包含越界路径：%s" % path_text)
+        snapshot = self._load_backup_snapshot(backup_id)
+        entries = snapshot["files"]
         for entry in entries:
             path = Path(entry["path"])
             _reject_symlink(path)
@@ -960,16 +1528,78 @@ class GlobalGateManager:
             if not candidates:
                 raise GateError("没有可用备份")
             selected = candidates[-1]
-        snapshot_path = self.paths.backup_root / selected / "snapshot.json"
-        if not snapshot_path.exists():
-            raise GateError("找不到备份：%s" % selected)
+        selected_snapshot = self._load_backup_snapshot(selected)
         if dry_run:
             return OperationResult("rollback", True, dry_run=True, backup_id=selected)
-        safety_backup = self._create_backup("pre-rollback")
+        selected_trust = self._trust_snapshot_from_dict(
+            selected_snapshot.get("hook_trust")
+        )
+        if selected_trust is None and selected_snapshot.get("action") == "install":
+            target_entry = next(
+                (
+                    entry
+                    for entry in selected_snapshot["files"]
+                    if entry.get("path") == str(self.paths.target_hook)
+                ),
+                None,
+            )
+            current_state = self._load_state(required=False)
+            if (
+                isinstance(target_entry, dict)
+                and target_entry.get("exists") is False
+                and isinstance(current_state, dict)
+                and current_state.get("trust_managed") is True
+            ):
+                # Compatibility with backups created before hook trust was
+                # included in snapshot.json.  A first-install snapshot with no
+                # target script must restore the manager-recorded preinstall
+                # trust value as well.
+                selected_trust = self._trust_snapshot_from_dict(
+                    current_state.get("trust_restore")
+                )
+                if selected_trust is None:
+                    raise GateError("旧版安装备份缺少可恢复的 Hook 信任状态")
+        current_gate_state = self._load_state(required=False)
+        if selected_trust is not None and isinstance(current_gate_state, dict):
+            recorded_key = current_gate_state.get("hook_key")
+            if recorded_key is not None and recorded_key != selected_trust.key:
+                raise GateError("Hook key 漂移，需迁移/重新安装")
+        current_trust = None
+        if selected_trust is not None:
+            with self._rpc() as rpc:
+                current_state, _ = _user_hook_state(
+                    rpc, self.paths.repo_root, self.paths.config
+                )
+            current_trust = HookTrustSnapshot(
+                selected_trust.key,
+                selected_trust.key in current_state,
+                copy.deepcopy(current_state.get(selected_trust.key))
+                if selected_trust.key in current_state
+                else None,
+            )
+        safety_backup = self._create_backup(
+            "pre-rollback", hook_trust=current_trust
+        )
+        trust_restored = False
         try:
             self._restore_backup(selected)
+            if selected_trust is not None:
+                expected = (
+                    copy.deepcopy(current_trust.value)
+                    if current_trust is not None and current_trust.exists
+                    else None
+                )
+                self._restore_trust_snapshot(selected_trust, expected)
+                trust_restored = True
         except Exception:
             self._restore_backup(safety_backup)
+            if trust_restored and current_trust is not None:
+                expected = (
+                    copy.deepcopy(selected_trust.value)
+                    if selected_trust is not None and selected_trust.exists
+                    else None
+                )
+                self._restore_trust_snapshot(current_trust, expected)
             raise
         return OperationResult("rollback", True, backup_id=safety_backup)
 
@@ -1016,12 +1646,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             if args.dry_run:
                 raise GateError("trust 不支持 --dry-run")
-            metadata = manager._inspect_or_trust(True)
+            trust_install = manager.install(trust=True)
             result = {
                 "action": "trust",
-                "changed": True,
-                "trust_status": metadata.get("trustStatus"),
-                "current_hash": metadata.get("currentHash"),
+                "changed": trust_install.changed,
+                "backup_id": trust_install.backup_id,
+                "trust_status": trust_install.trust_status,
             }
             exit_code = 0
     except GateError as error:
