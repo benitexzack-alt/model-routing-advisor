@@ -6,8 +6,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -319,6 +321,96 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             self.assertIn("门禁告警", result["systemMessage"])
             self.assertIn("fail-open", result["systemMessage"])
             self.assertNotEqual(result.get("decision"), "block")
+
+    def test_existing_state_directory_mode_is_preserved(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "existing-state"
+            state_dir.mkdir(mode=0o755)
+            state_dir.chmod(0o755)
+
+            result = process_hook(
+                payload("开始一个新的重要项目。"), state_dir=state_dir
+            )
+
+            self.assertIn('reason="new_task"', injected_context(result))
+            self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o755)
+            self.assertTrue((state_dir / "gate-state.json").is_file())
+            self.assertTrue((state_dir / "gate-events.jsonl").is_file())
+
+    def test_new_state_directory_is_private_without_changing_existing_parent(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir) / "existing-parent"
+            parent.mkdir(mode=0o755)
+            parent.chmod(0o755)
+            state_dir = parent / "new-state"
+
+            result = process_hook(
+                payload("开始一个新的重要项目。"), state_dir=state_dir
+            )
+
+            self.assertIn('reason="new_task"', injected_context(result))
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o700)
+
+    def test_shared_temporary_root_is_rejected_without_changing_mode(self) -> None:
+        shared_temp_root = Path(tempfile.gettempdir()).resolve()
+        original_mode = stat.S_IMODE(shared_temp_root.stat().st_mode)
+
+        result = process_hook(
+            payload("开始一个新的重要项目。"), state_dir=shared_temp_root
+        )
+
+        self.assertTrue(result["continue"])
+        self.assertIn("state_unavailable:GateStateError", result["systemMessage"])
+        self.assertIn("fail-open", result["systemMessage"])
+        self.assertIn('reason="gate_error"', injected_context(result))
+        self.assertEqual(stat.S_IMODE(shared_temp_root.stat().st_mode), original_mode)
+        self.assertNotEqual(result.get("decision"), "block")
+
+    def test_existing_world_writable_state_directory_is_rejected_unchanged(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "unsafe-state"
+            state_dir.mkdir(mode=0o777)
+            state_dir.chmod(0o777)
+
+            result = process_hook(
+                payload("开始一个新的重要项目。"), state_dir=state_dir
+            )
+
+            self.assertTrue(result["continue"])
+            self.assertIn("state_unavailable:GateStateError", result["systemMessage"])
+            self.assertIn('reason="gate_error"', injected_context(result))
+            self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o777)
+            self.assertEqual(list(state_dir.iterdir()), [])
+
+    def test_cli_rejects_shared_temporary_root_from_environment(self) -> None:
+        shared_temp_root = Path(tempfile.gettempdir()).resolve()
+        original_mode = stat.S_IMODE(shared_temp_root.stat().st_mode)
+        env = dict(os.environ)
+        env["MODEL_ROUTING_GATE_STATE_DIR"] = str(shared_temp_root)
+
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH)],
+            input=json.dumps(payload("开始一个新的重要项目。")),
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["continue"])
+        self.assertIn("state_unavailable:GateStateError", result["systemMessage"])
+        self.assertIn('reason="gate_error"', injected_context(result))
+        self.assertEqual(stat.S_IMODE(shared_temp_root.stat().st_mode), original_mode)
+        self.assertEqual(completed.stderr, "")
 
     def test_corrupt_state_warns_and_fails_open(self) -> None:
         from tempfile import TemporaryDirectory

@@ -269,12 +269,64 @@ def _append_event(path: Path, event: dict[str, Any]) -> None:
     os.chmod(path, 0o600)
 
 
+def _unsafe_state_roots() -> set[Path]:
+    """Return broad roots that must never be used as the managed state dir."""
+
+    candidates = {
+        Path("/"),
+        Path("/home"),
+        Path("/tmp"),
+        Path("/var"),
+        Path("/var/tmp"),
+        Path("/var/folders"),
+        Path("/private"),
+        Path("/private/tmp"),
+        Path("/private/var"),
+        Path("/private/var/tmp"),
+        Path("/private/var/folders"),
+        Path("/Users"),
+        Path.home(),
+        Path(tempfile.gettempdir()),
+    }
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        candidates.add(Path(codex_home).expanduser())
+    else:
+        candidates.add(Path.home() / ".codex")
+
+    resolved: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved.add(candidate.resolve(strict=False))
+        except OSError:
+            continue
+    return resolved
+
+
+def _validate_state_dir(state_dir: Path) -> None:
+    try:
+        resolved = state_dir.expanduser().resolve(strict=False)
+    except OSError as error:
+        raise GateStateError("state_dir_resolution_failed") from error
+    if resolved in _unsafe_state_roots():
+        raise GateStateError("unsafe_state_dir")
+    if resolved.exists():
+        try:
+            metadata = resolved.stat()
+        except OSError as error:
+            raise GateStateError("state_dir_stat_failed") from error
+        if metadata.st_uid != os.getuid():
+            raise GateStateError("state_dir_not_owned")
+        if metadata.st_mode & 0o022:
+            raise GateStateError("state_dir_writable_by_others")
+
+
 @contextmanager
 def _state_lock(state_dir: Path) -> Iterator[None]:
+    _validate_state_dir(state_dir)
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not state_dir.is_dir():
         raise NotADirectoryError(str(state_dir))
-    os.chmod(state_dir, 0o700)
     lock_path = state_dir / LOCK_FILENAME
     with lock_path.open("a+", encoding="utf-8") as handle:
         os.chmod(lock_path, 0o600)
