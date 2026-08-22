@@ -1,8 +1,12 @@
 {
   "schema_version": 1,
   "trial_id": "trial-20260819-v0.1-01",
-  "status": "active",
+  "status": "completed",
   "started_at": "2026-08-19T10:12:22+08:00",
+  "closed_at": "2026-08-23T01:46:02+08:00",
+  "closure_reason": "用户明确授权在 V0.1 未达到原定样本与效率指标前升级到全局 V1；V0.1 提前收口，不构成指标通过。",
+  "closure_metrics_passed": false,
+  "superseded_by": "MRA_GLOBAL_GATE_V1",
   "source_commit": "db98b44",
   "targets": {
     "review_eligibility": {
