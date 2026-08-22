@@ -414,6 +414,58 @@ class GlobalGateBehaviorTests(unittest.TestCase):
                 self.assertTrue(session["route_selection_observed"])
                 self.assertEqual(session["route_prompt_count"], 1)
 
+    def test_initial_choice_with_followup_instruction_is_observed_but_negation_is_not(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            process_hook(
+                payload("开始一个新的项目。", session_id="choice-with-detail"),
+                state_dir=state_dir,
+            )
+            selected = process_hook(
+                payload(
+                    "好的，优先保证质量。只确认并继续沿用，不要再展示路由卡。",
+                    session_id="choice-with-detail",
+                    turn_id="turn-2",
+                ),
+                state_dir=state_dir,
+            )
+            self.assertIsNone(injected_context(selected))
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                state["sessions"]["choice-with-detail"]["route_selection_observed"]
+            )
+
+            process_hook(
+                payload("开始另一个项目。", session_id="negated-choice"),
+                state_dir=state_dir,
+            )
+            rejected = process_hook(
+                payload(
+                    "不要按推荐执行，先解释原卡。",
+                    session_id="negated-choice",
+                    turn_id="turn-2",
+                ),
+                state_dir=state_dir,
+            )
+            self.assertIsNone(injected_context(rejected))
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(events[-1]["reason"], "route_prompt_pending")
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(
+                state["sessions"]["negated-choice"]["route_selection_observed"]
+            )
+
     def test_explicit_change_after_selection_can_request_one_new_route_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 

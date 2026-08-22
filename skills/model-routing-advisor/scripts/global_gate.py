@@ -66,7 +66,9 @@ EXPLANATION_PREFIXES = (
 )
 
 INITIAL_SELECTION_PATTERN = re.compile(
-    r"^(?:好的[，,]?|确认)?(?:按推荐执行|优先节省额度|优先保证质量)$"
+    r"^(?:(?:好的?|确认|可以|同意)[，,]?)?(?:那就|就)?"
+    r"(?:按推荐执行|优先节省额度|优先保证质量)"
+    r"(?=$|[。！!，,；;：:])"
 )
 
 USER_ROUTE_REQUEST_PATTERNS = (
@@ -186,7 +188,7 @@ def _is_user_route_request(text: str) -> bool:
 
 
 def _is_initial_selection(text: str) -> bool:
-    return INITIAL_SELECTION_PATTERN.fullmatch(_strip_terminal_punctuation(text)) is not None
+    return INITIAL_SELECTION_PATTERN.match(_strip_terminal_punctuation(text)) is not None
 
 
 def _new_state() -> dict[str, Any]:
