@@ -352,6 +352,9 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             "请更换模型服务供应商，然后继续。",
             "调整数据模型字段后继续执行。",
             "把页面输出改为质量优先，然后继续验收。",
+            "为了测试，请重新生成模型路由数据。",
+            "把业务模型换成 Terra。",
+            "把推理模型换成 Spark。",
         )
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
@@ -525,7 +528,10 @@ class GlobalGateBehaviorTests(unittest.TestCase):
         prompts = (
             "按推荐执行？",
             "按推荐执行，还是优先节省额度？",
+            "按推荐执行；优先节省额度。",
+            "按推荐执行；还是优先节省额度？",
             "使用 GPT-5.6-Sol high 可以吗？",
+            "Sol high，Terra medium。",
         )
         for index, prompt_text in enumerate(prompts, start=1):
             with self.subTest(prompt=prompt_text), TemporaryDirectory() as temp_dir:
@@ -559,7 +565,11 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             "就按推荐执行吧。",
             "使用 GPT-5.6-Sol high。",
             "Sol ultra。",
+            "使用 GPT-5.6-Sol 的 high 档。",
+            "我选择 Sol ultra。",
+            "还是按推荐执行吧。",
             "按推荐执行。接下来可以继续吗？",
+            "按推荐执行；继续执行测试。",
         )
         for index, prompt_text in enumerate(prompts, start=1):
             with self.subTest(prompt=prompt_text), TemporaryDirectory() as temp_dir:
@@ -593,6 +603,8 @@ class GlobalGateBehaviorTests(unittest.TestCase):
         requests = (
             "重选模型",
             "重新选一下模型",
+            "麻烦重新选择模型",
+            "请帮我重新选择模型",
             "把模型换成 Terra",
             "把推理档位调到 high",
             "改成优先节省额度",
@@ -646,6 +658,34 @@ class GlobalGateBehaviorTests(unittest.TestCase):
                 session = state["sessions"][session_id]
                 self.assertFalse(session["route_selection_observed"])
                 self.assertEqual(session["route_prompt_count"], 2)
+
+    def test_explicit_configuration_reroutes_then_can_confirm_replacement(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            process_hook(payload("开始一个新的项目。"), state_dir=state_dir)
+            process_hook(
+                payload("按推荐执行。", turn_id="turn-2"), state_dir=state_dir
+            )
+            rerouted = process_hook(
+                payload("我选择 Sol ultra。", turn_id="turn-3"),
+                state_dir=state_dir,
+            )
+            confirmed = process_hook(
+                payload("我选择 Sol ultra。", turn_id="turn-4"),
+                state_dir=state_dir,
+            )
+
+            self.assertIn('reason="user_requested"', injected_context(rerouted))
+            self.assertIsNone(injected_context(confirmed))
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            session = state["sessions"]["session-1"]
+            self.assertTrue(session["route_selection_observed"])
+            self.assertEqual(session["route_prompt_count"], 2)
+            self.assertEqual(session["last_reason"], "route_already_set")
 
     def test_legacy_check_count_migrates_to_sticky_route_without_duplicate(self) -> None:
         from tempfile import TemporaryDirectory

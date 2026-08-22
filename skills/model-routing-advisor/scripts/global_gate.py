@@ -88,37 +88,50 @@ MODEL_ROUTE_TARGET = (
 EFFORT_ROUTE_TARGET = r"(?:low|medium|high|xhigh|max|ultra|低|中|高|很高|极高|最大)"
 
 EXPLICIT_CONFIGURATION_PATTERN = re.compile(
-    r"^(?:(?:好的?|确认|可以|同意)[，,]?)?(?:那就|就)?"
-    r"(?:(?:使用|选择|改用|采用|切换到|设为))?"
-    rf"{MODEL_ROUTE_TARGET}[·./,+_—-]?{EFFORT_ROUTE_TARGET}"
-    r"(?:吧|了)?"
+    r"^(?:(?:好的?|确认|可以|同意|麻烦)[，,]?)?(?:那就|就)?"
+    r"(?:(?:我)?(?:用|使用|选择|选|改用|采用)|切换到|设为)?"
+    rf"{MODEL_ROUTE_TARGET}(?:的)?[·./,+_—-]?{EFFORT_ROUTE_TARGET}"
+    r"(?:档位|档)?(?:吧|了)?"
     r"(?=$|[。！!，,；;：:])"
 )
+EXPLICIT_CONFIGURATION_TOKEN_PATTERN = re.compile(
+    rf"{MODEL_ROUTE_TARGET}(?:的)?[·./,+_—-]?{EFFORT_ROUTE_TARGET}(?:档位|档)?"
+)
+
+POLITE_ROUTE_PREFIX = r"(?:(?:请帮我|麻烦帮我|请|麻烦|现在|帮我|给我|我想|我要))?"
+ROUTE_CLAUSE_START = r"(?:^|[。！!，,；;：:])"
+ROUTE_CLAUSE_END = r"(?=$|[。！!，,；;：:])"
 
 USER_ROUTE_REQUEST_PATTERNS = (
     re.compile(
-        r"(?:^|[。！!，,；;：:])(?:(?:请|现在|帮我|给我|我想|我要))?"
+        rf"{ROUTE_CLAUSE_START}{POLITE_ROUTE_PREFIX}"
         rf"(?:重选(?:一下|一次|一遍)?{MODEL_ROUTE_OBJECT}|"
         r"(?:重新|再次|再)(?:选|选择|推荐|评估)"
         rf"(?:一下|一次|一遍)?{MODEL_ROUTE_OBJECT})"
-        r"(?=$|[。！!，,；;：:])"
+        rf"{ROUTE_CLAUSE_END}"
     ),
     re.compile(
-        r"(?:重新|再次|再)(?:给我|生成|做)?(?:一张|一次|一遍)?"
-        r"(?:模型)?(?:路由卡|路由|选型)"
+        rf"{ROUTE_CLAUSE_START}{POLITE_ROUTE_PREFIX}"
+        r"(?:重新|再次|再)(?:(?:给我)?(?:生成|做)?)?"
+        r"(?:一张|一次|一遍)?(?:模型)?(?:路由卡|路由|选型)"
+        rf"{ROUTE_CLAUSE_END}"
     ),
     re.compile(
-        r"(?:^|[。！!，,；;：:])(?:(?:请|现在|帮我|给我|我想|我要))?"
+        rf"{ROUTE_CLAUSE_START}{POLITE_ROUTE_PREFIX}"
         rf"(?:换|更换)(?:一个|个|一下)?{MODEL_ROUTE_OBJECT}"
-        r"(?=$|[。！!，,；;：:])"
+        rf"{ROUTE_CLAUSE_END}"
     ),
     re.compile(
-        rf"(?:把)?(?:当前|本任务|这个任务)?{MODEL_ROUTE_OBJECT}.{{0,8}}"
+        rf"{ROUTE_CLAUSE_START}{POLITE_ROUTE_PREFIX}(?:把|将)?"
+        rf"(?:当前|本任务|这个任务)?{MODEL_ROUTE_OBJECT}.{{0,8}}"
         rf"(?:换成|改成|改为|调整为|切换到){MODEL_ROUTE_TARGET}"
+        rf"{ROUTE_CLAUSE_END}"
     ),
     re.compile(
-        rf"(?:把)?(?:当前|本任务|这个任务)?(?:档位|推理档位).{{0,8}}"
+        rf"{ROUTE_CLAUSE_START}{POLITE_ROUTE_PREFIX}(?:把|将)?"
+        rf"(?:当前|本任务|这个任务)?(?:档位|推理档位).{{0,8}}"
         rf"(?:换成|改成|改为|调整为|调到|切换到){EFFORT_ROUTE_TARGET}"
+        rf"{ROUTE_CLAUSE_END}"
     ),
     re.compile(
         r"(?:^|[。！!，,；;：:])(?:请)?(?:把)?"
@@ -237,14 +250,50 @@ def _is_user_route_request(text: str) -> bool:
         for match in pattern.finditer(text):
             if not _match_is_negated(text, match):
                 return True
-    return False
+    return _is_explicit_configuration(text)
+
+
+def _decision_clause(text: str) -> str:
+    return re.split(r"(?<=[。！!\n])", text, maxsplit=1)[0]
+
+
+def _normalize_final_still_decision(decision_clause: str) -> str:
+    return re.sub(
+        r"^((?:(?:好的?|确认|可以|同意)[，,]?)?)还是"
+        r"(?=(?:按推荐执行|优先节省额度|优先保证质量))",
+        r"\1",
+        decision_clause,
+        count=1,
+    )
+
+
+def _selection_counts(decision_clause: str) -> tuple[int, int]:
+    choice_count = sum(
+        decision_clause.count(choice) for choice in SELECTION_PHRASES
+    )
+    configuration_count = len(
+        EXPLICIT_CONFIGURATION_TOKEN_PATTERN.findall(decision_clause)
+    )
+    return choice_count, configuration_count
+
+
+def _is_explicit_configuration(text: str) -> bool:
+    decision_clause = _normalize_final_still_decision(_decision_clause(text))
+    if SELECTION_QUESTION_OR_ALTERNATIVE.search(decision_clause):
+        return False
+    choice_count, configuration_count = _selection_counts(decision_clause)
+    if choice_count != 0 or configuration_count != 1:
+        return False
+    stripped = _strip_terminal_punctuation(decision_clause)
+    return EXPLICIT_CONFIGURATION_PATTERN.match(stripped) is not None
 
 
 def _is_initial_selection(text: str) -> bool:
-    decision_clause = re.split(r"(?<=[。！!；;\n])", text, maxsplit=1)[0]
+    decision_clause = _normalize_final_still_decision(_decision_clause(text))
     if SELECTION_QUESTION_OR_ALTERNATIVE.search(decision_clause):
         return False
-    if sum(decision_clause.count(choice) for choice in SELECTION_PHRASES) > 1:
+    choice_count, configuration_count = _selection_counts(decision_clause)
+    if choice_count + configuration_count != 1:
         return False
     stripped = _strip_terminal_punctuation(decision_clause)
     return bool(
