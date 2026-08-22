@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "gate_id": "MRA_GLOBAL_GATE_V1",
+  "policy_version": "global-gate/1.1",
+  "status": "sticky_cli_app_server_canary_verified",
+  "validated_at": "2026-08-23T04:56:04+08:00",
+  "desktop_ui_acceptance": "pending_next_real_fresh_task",
+  "scope": "one_codex_conversation_or_task",
+  "initial_routing_basis": "highest_foreseeable_lifecycle_complexity_and_risk_floor",
+  "sticky_policy": {
+    "one_initial_card_per_scope": true,
+    "pending_card_is_not_duplicated": true,
+    "stage_scope_risk_permission_delivery_and_archive_changes_reuse_selection": true,
+    "second_work_item_in_same_scope_reuses_selection": true,
+    "explicit_user_reroute_can_create_one_replacement_card": true,
+    "runtime_verified_unavailability_can_create_one_replacement_card": true,
+    "separate_safety_and_action_gates_remain_active": true
+  },
+  "user_decision": {
+    "preference": "quality",
+    "selected_model": "gpt-5.6-sol",
+    "selected_effort": "ultra",
+    "runtime_switch_verified": false
+  },
+  "historical_trial": {
+    "trial_id": "trial-20260819-v0.1-01",
+    "status": "completed_early_by_explicit_user_override",
+    "calendar_days": 5,
+    "metrics_passed": false,
+    "route_decision_count": 3,
+    "completed_task_count": 0,
+    "acceptance_rate": 0.6666666666666666,
+    "actual_configuration_pending_count": 3,
+    "verified_efficiency_signal_count": 0,
+    "superseded_by": "MRA_GLOBAL_GATE_V1"
+  },
+  "installation": {
+    "codex_version": "0.149.0-alpha.4.1",
+    "manager_check_ok": true,
+    "manager_issues": [],
+    "trust_status": "trusted",
+    "managed_agents_block_count": 1,
+    "managed_hook_count": 1,
+    "hook_key": "/Users/pc/.codex/hooks.json:user_prompt_submit:0:0",
+    "hook_current_hash": "sha256:4d8291bddcbd0e36f6c0a408c4b9af633fea2fab02c8e649b31027b5f0bb1273",
+    "agents_block_sha256": "395e6012fca9717a02f2b88821295ef64642d5500895ce8214a364f23c96c9db",
+    "hook_file_sha256": "5cb4cb551f7dfbcfceb99cf4de03983a60362ed5395a51913de959a990b31f5d",
+    "source_target_installed_skill_hook_match": true,
+    "target_hook_mode": "0700",
+    "runtime_state_directory_mode": "0700",
+    "runtime_state_file_mode": "0600",
+    "install_dry_run_changed": false,
+    "uninstall_dry_run_changed": true,
+    "backup_ids": [
+      "20260822T171222439652Z-install-df41695f",
+      "20260822T174109000545Z-install-af28c7a0",
+      "20260822T194606807064Z-install-df2a7630",
+      "20260822T195106612935Z-install-9c4ba3ab",
+      "20260822T204609725167Z-install-d319dc5f",
+      "20260822T205243106664Z-install-98920bc9",
+      "20260822T205439610204Z-install-6ff05eda"
+    ],
+    "all_backups_rollback_dry_run_ok": true
+  },
+  "verification": {
+    "hook_and_manager_tests_system_python": "61/61",
+    "hook_and_manager_tests_current_python": "61/61",
+    "router_tests_system_python": "16/16",
+    "router_tests_current_python": "16/16",
+    "trial_summary_tests_system_python": "27/27",
+    "trial_summary_tests_current_python": "27/27",
+    "py_compile_system_python": true,
+    "py_compile_current_python": true,
+    "source_skill_quick_validate_current_python": true,
+    "installed_skill_quick_validate_current_python": true,
+    "quick_validate_system_python": {
+      "counted_as_success": false,
+      "reason": "missing_pyyaml_dependency"
+    },
+    "isolated_transaction_e2e": {
+      "validated_head": "97120e51c918490827b243a71256d8c75bbc8bd9",
+      "hook_sha256": "5cb4cb551f7dfbcfceb99cf4de03983a60362ed5395a51913de959a990b31f5d",
+      "install_and_trust": true,
+      "install_rollback_removed_trust": true,
+      "uninstall_removed_trust": true,
+      "uninstall_rollback_restored_trust": true,
+      "final_check_ok": true,
+      "final_trust_status": "trusted",
+      "production_global_configuration_modified": false
+    },
+    "live_cwds_trusted": [
+      "/Users/pc/Documents/model-routing-advisor",
+      "/Users/pc/Documents/口播",
+      "/Users/pc/Documents/个人知识库"
+    ],
+    "installed_hook_sequence": {
+      "session_id": "mra-sticky-installed-20260823",
+      "steps": [
+        "new_task_inject",
+        "quality_choice_route_already_set",
+        "stage_change_route_already_set",
+        "high_risk_change_route_already_set",
+        "archive_resume_route_already_set",
+        "second_work_item_route_already_set",
+        "explicit_reroute_user_requested",
+        "duplicate_reroute_route_prompt_pending",
+        "quota_choice_route_already_set",
+        "continue_route_already_set"
+      ],
+      "route_prompt_count": 2,
+      "raw_prompt_persisted": false
+    },
+    "counterexample_audit": {
+      "reported_cases_replayed": 26,
+      "reported_cases_passed": 26,
+      "confirmed_session_retained_after_more_than_one_thousand_sessions": true,
+      "business_model_service_and_routing_data_do_not_reroute": true,
+      "question_multiple_choice_and_multiple_configuration_stay_pending": true,
+      "natural_final_decision_and_explicit_configuration_confirm": true,
+      "installed_hook_direct_probe_passed": true
+    },
+    "real_cli": {
+      "thread_id": "01a02b03-ae2d-7ac2-90e6-0231b6ab5503",
+      "first_new_task_card_visible": true,
+      "long_form_selection_recognized_after_fix": true,
+      "stage_change_reused_selection": true,
+      "high_risk_change_reused_selection": true,
+      "archive_unarchive_resume_reused_selection": true,
+      "explicit_reroute_created_one_replacement_card": true,
+      "pending_replacement_card_not_duplicated": true,
+      "post_fix_reasons": [
+        "route_already_set",
+        "route_already_set",
+        "route_already_set",
+        "user_requested",
+        "route_prompt_pending"
+      ],
+      "route_prompt_count": 2,
+      "archived_after_test": true,
+      "full_card_schema_desktop_ui": "pending"
+    }
+  },
+  "implementation_commits": [
+    "ae77f25",
+    "9fca797",
+    "7b9b0ab",
+    "b3d3028",
+    "3a80d9d",
+    "762cc00",
+    "3998825",
+    "a41a0fd",
+    "54cbd17",
+    "5d60ce6",
+    "11bd5ca",
+    "bec2bef",
+    "97120e5"
+  ],
+  "boundaries": [
+    "fail_open_reminder_not_pre_tool_hard_lock",
+    "does_not_switch_runtime_model_or_effort",
+    "route_selection_observed_is_not_runtime_configuration_evidence",
+    "new_independent_conversation_routes_once_again",
+    "heuristic_classification_can_still_miss_or_false_trigger",
+    "runtime_unavailability_exception_not_destructively_tested",
+    "session_state_and_event_log_grow_without_lossy_eviction",
+    "runtime_log_has_no_rotation_and_prompt_hash_is_not_anonymization",
+    "real_global_rollback_was_dry_run_only",
+    "desktop_full_card_ui_acceptance_pending"
+  ],
+  "preexisting_unrelated_missing_hooks": [
+    "/Users/pc/.codex/hooks/post-todowrite.sh",
+    "/Users/pc/.codex/hooks/session-start.sh",
+    "/Users/pc/.codex/hooks/session-stop.sh"
+  ],
+  "preexisting_nonblocking_cli_warnings": [
+    "under_development_feature_chronicle",
+    "under_development_feature_respect_system_proxy",
+    "skill_descriptions_shortened_for_context_budget"
+  ]
+}
