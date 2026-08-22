@@ -305,24 +305,77 @@ class GlobalGateBehaviorTests(unittest.TestCase):
     def test_negated_model_change_does_not_request_reroute(self) -> None:
         from tempfile import TemporaryDirectory
 
+        prompts = (
+            "不要重新选模型，继续执行。",
+            "我不是要重新选择模型，只是问为什么。",
+            "不要因为现在进入部署阶段就重新选择模型，继续原方案。",
+            "我无意重选模型，继续现有路线。",
+        )
+        for index, prompt_text in enumerate(prompts, start=1):
+            with self.subTest(prompt=prompt_text), TemporaryDirectory() as temp_dir:
+                state_dir = Path(temp_dir)
+                session_id = f"negated-reroute-{index}"
+                process_hook(
+                    payload("先分析本地方案。", session_id=session_id),
+                    state_dir=state_dir,
+                )
+                process_hook(
+                    payload(
+                        "按推荐执行。",
+                        session_id=session_id,
+                        turn_id="turn-2",
+                    ),
+                    state_dir=state_dir,
+                )
+                result = process_hook(
+                    payload(
+                        prompt_text,
+                        session_id=session_id,
+                        turn_id="turn-3",
+                    ),
+                    state_dir=state_dir,
+                )
+
+                self.assertIsNone(injected_context(result))
+                event = json.loads(
+                    (state_dir / "gate-events.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()[-1]
+                )
+                self.assertEqual(event["reason"], "route_already_set")
+
+    def test_business_model_service_changes_do_not_request_reroute(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        prompts = (
+            "现在进入部署阶段，请把模型服务切换到生产环境。",
+            "请更换模型服务供应商，然后继续。",
+            "调整数据模型字段后继续执行。",
+            "把页面输出改为质量优先，然后继续验收。",
+        )
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
-            process_hook(payload("先分析本地方案。"), state_dir=state_dir)
+            process_hook(payload("先分析部署方案。"), state_dir=state_dir)
             process_hook(
                 payload("按推荐执行。", turn_id="turn-2"), state_dir=state_dir
             )
-            result = process_hook(
-                payload("不要重新选模型，继续执行。", turn_id="turn-3"),
-                state_dir=state_dir,
-            )
 
-            self.assertIsNone(injected_context(result))
-            event = json.loads(
-                (state_dir / "gate-events.jsonl")
+            for index, prompt_text in enumerate(prompts, start=3):
+                result = process_hook(
+                    payload(prompt_text, turn_id=f"turn-{index}"),
+                    state_dir=state_dir,
+                )
+                self.assertIsNone(injected_context(result))
+
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
                 .read_text(encoding="utf-8")
-                .splitlines()[-1]
+                .splitlines()
+            ]
+            self.assertTrue(
+                all(event["reason"] == "route_already_set" for event in events[2:])
             )
-            self.assertEqual(event["reason"], "route_already_set")
 
     def test_second_independent_task_in_same_session_reuses_route(self) -> None:
         from tempfile import TemporaryDirectory
@@ -466,6 +519,74 @@ class GlobalGateBehaviorTests(unittest.TestCase):
                 state["sessions"]["negated-choice"]["route_selection_observed"]
             )
 
+    def test_confirmation_questions_and_alternatives_stay_pending(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        prompts = (
+            "按推荐执行？",
+            "按推荐执行，还是优先节省额度？",
+            "使用 GPT-5.6-Sol high 可以吗？",
+        )
+        for index, prompt_text in enumerate(prompts, start=1):
+            with self.subTest(prompt=prompt_text), TemporaryDirectory() as temp_dir:
+                state_dir = Path(temp_dir)
+                session_id = f"question-choice-{index}"
+                process_hook(
+                    payload("开始一个新的项目。", session_id=session_id),
+                    state_dir=state_dir,
+                )
+                result = process_hook(
+                    payload(
+                        prompt_text,
+                        session_id=session_id,
+                        turn_id="turn-2",
+                    ),
+                    state_dir=state_dir,
+                )
+
+                self.assertIsNone(injected_context(result))
+                state = json.loads(
+                    (state_dir / "gate-state.json").read_text(encoding="utf-8")
+                )
+                session = state["sessions"][session_id]
+                self.assertFalse(session["route_selection_observed"])
+                self.assertEqual(session["last_reason"], "route_prompt_pending")
+
+    def test_declarative_choice_and_explicit_configuration_confirm(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        prompts = (
+            "就按推荐执行吧。",
+            "使用 GPT-5.6-Sol high。",
+            "Sol ultra。",
+            "按推荐执行。接下来可以继续吗？",
+        )
+        for index, prompt_text in enumerate(prompts, start=1):
+            with self.subTest(prompt=prompt_text), TemporaryDirectory() as temp_dir:
+                state_dir = Path(temp_dir)
+                session_id = f"declarative-choice-{index}"
+                process_hook(
+                    payload("开始一个新的项目。", session_id=session_id),
+                    state_dir=state_dir,
+                )
+                result = process_hook(
+                    payload(
+                        prompt_text,
+                        session_id=session_id,
+                        turn_id="turn-2",
+                    ),
+                    state_dir=state_dir,
+                )
+
+                self.assertIsNone(injected_context(result))
+                state = json.loads(
+                    (state_dir / "gate-state.json").read_text(encoding="utf-8")
+                )
+                session = state["sessions"][session_id]
+                self.assertTrue(session["route_selection_observed"])
+                self.assertEqual(session["last_reason"], "route_already_set")
+                self.assertEqual(session["route_prompt_count"], 1)
+
     def test_explicit_change_after_selection_can_request_one_new_route_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -473,8 +594,12 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             "重选模型",
             "重新选一下模型",
             "把模型换成 Terra",
+            "把推理档位调到 high",
             "改成优先节省额度",
             "改成优先保证质量",
+            "改为质量优先",
+            "改回按推荐执行",
+            "把模型路由改为平衡",
             "再给我一张模型路由卡",
         )
         for index, request in enumerate(requests, start=1):
@@ -605,6 +730,63 @@ class GlobalGateBehaviorTests(unittest.TestCase):
 
             self.assertIn('reason="new_task"', injected_context(first))
             self.assertIn('reason="new_task"', injected_context(second))
+
+    def test_confirmed_session_is_not_evicted_after_one_thousand_later_sessions(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            sessions = {
+                "archived-session": {
+                    "session_id": "archived-session",
+                    "turn_id": "old-turn",
+                    "cwd": "/tmp/example-project",
+                    "last_prompt_sha256": "old-hash",
+                    "last_decision": "skip",
+                    "last_reason": "route_already_set",
+                    "last_observed_signature": "routing:initial",
+                    "route_prompt_count": 1,
+                    "route_prompt_shown": True,
+                    "route_selection_observed": True,
+                    "last_seen_at": "2026-01-01T00:00:00+00:00",
+                }
+            }
+            for index in range(1000):
+                session_id = f"later-session-{index:04d}"
+                sessions[session_id] = {
+                    "session_id": session_id,
+                    "last_seen_at": f"2026-02-01T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                }
+            (state_dir / "gate-state.json").write_text(
+                json.dumps({"schema_version": 1, "sessions": sessions}),
+                encoding="utf-8",
+            )
+
+            process_hook(
+                payload(
+                    "开始一个全新的任务。",
+                    session_id="overflow-session",
+                    turn_id="overflow-turn",
+                ),
+                state_dir=state_dir,
+            )
+            resumed = process_hook(
+                payload(
+                    "恢复旧归档任务并继续。",
+                    session_id="archived-session",
+                    turn_id="resume-turn",
+                ),
+                state_dir=state_dir,
+            )
+
+            self.assertIsNone(injected_context(resumed))
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(state["sessions"]), 1002)
+            archived = state["sessions"]["archived-session"]
+            self.assertEqual(archived["last_reason"], "route_already_set")
+            self.assertEqual(archived["route_prompt_count"], 1)
 
     def test_bad_payload_warns_and_fails_open(self) -> None:
         from tempfile import TemporaryDirectory

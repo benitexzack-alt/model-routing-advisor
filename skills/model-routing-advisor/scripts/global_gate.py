@@ -30,7 +30,6 @@ STATE_FILENAME = "gate-state.json"
 LOG_FILENAME = "gate-events.jsonl"
 LOCK_FILENAME = ".gate.lock"
 STATE_DIR_ENV = "MODEL_ROUTING_GATE_STATE_DIR"
-MAX_SESSIONS = 1000
 
 REQUIRED_TEXT_FIELDS = ("session_id", "turn_id", "cwd", "prompt")
 
@@ -68,30 +67,80 @@ EXPLANATION_PREFIXES = (
 INITIAL_SELECTION_PATTERN = re.compile(
     r"^(?:(?:好的?|确认|可以|同意)[，,]?)?(?:那就|就)?"
     r"(?:按推荐执行|优先节省额度|优先保证质量)"
+    r"(?:吧|了)?"
+    r"(?=$|[。！!，,；;：:])"
+)
+
+SELECTION_PHRASES = ("按推荐执行", "优先节省额度", "优先保证质量")
+SELECTION_QUESTION_OR_ALTERNATIVE = re.compile(
+    r"(?:[？?]|还是|或者|或是|是否|要不要|可以吗|选哪个|选哪一个|哪个好|哪一个好)"
+)
+
+MODEL_ROUTE_OBJECT = (
+    r"(?:(?:codex)?模型"
+    r"(?!服务|接口|应用|系统|实例|端点|部署|环境|网关|供应商|权重|参数|结构|架构|字段|数据)"
+    r"|档位|推理档位)"
+)
+MODEL_ROUTE_TARGET = (
+    r"(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|"
+    r"gpt-5\.3-codex-spark|sol|terra|luna|spark)"
+)
+EFFORT_ROUTE_TARGET = r"(?:low|medium|high|xhigh|max|ultra|低|中|高|很高|极高|最大)"
+
+EXPLICIT_CONFIGURATION_PATTERN = re.compile(
+    r"^(?:(?:好的?|确认|可以|同意)[，,]?)?(?:那就|就)?"
+    r"(?:(?:使用|选择|改用|采用|切换到|设为))?"
+    rf"{MODEL_ROUTE_TARGET}[·./,+_—-]?{EFFORT_ROUTE_TARGET}"
+    r"(?:吧|了)?"
     r"(?=$|[。！!，,；;：:])"
 )
 
 USER_ROUTE_REQUEST_PATTERNS = (
-    re.compile(r"重选(?:一下|一次|一遍)?(?:模型|档位|推理档位)"),
     re.compile(
+        r"(?:^|[。！!，,；;：:])(?:(?:请|现在|帮我|给我|我想|我要))?"
+        rf"(?:重选(?:一下|一次|一遍)?{MODEL_ROUTE_OBJECT}|"
         r"(?:重新|再次|再)(?:选|选择|推荐|评估)"
-        r"(?:一下|一次|一遍)?(?:模型|档位|推理档位)"
+        rf"(?:一下|一次|一遍)?{MODEL_ROUTE_OBJECT})"
+        r"(?=$|[。！!，,；;：:])"
     ),
     re.compile(
         r"(?:重新|再次|再)(?:给我|生成|做)?(?:一张|一次|一遍)?"
         r"(?:模型)?(?:路由卡|路由|选型)"
     ),
-    re.compile(r"(?:换|更换)(?:一个|个|一下)?模型"),
     re.compile(
-        r"(?:把)?(?:模型|档位|推理档位).{0,8}"
-        r"(?:换成|改成|改为|调整为|调到|切换到)"
+        r"(?:^|[。！!，,；;：:])(?:(?:请|现在|帮我|给我|我想|我要))?"
+        rf"(?:换|更换)(?:一个|个|一下)?{MODEL_ROUTE_OBJECT}"
+        r"(?=$|[。！!，,；;：:])"
     ),
     re.compile(
-        r"(?:换成|改成|改为|调整为|切换为|切换到).{0,8}"
-        r"(?:gpt[-\w.]*|sol|terra|luna|spark)"
+        rf"(?:把)?(?:当前|本任务|这个任务)?{MODEL_ROUTE_OBJECT}.{{0,8}}"
+        rf"(?:换成|改成|改为|调整为|切换到){MODEL_ROUTE_TARGET}"
     ),
-    re.compile(r"(?:改成|改为|调整为|切换为)(?:优先)?(?:节省|省)(?:一点|一些)?额度"),
-    re.compile(r"(?:改成|改为|调整为|切换为)(?:优先)?(?:保证|保障|保)质量"),
+    re.compile(
+        rf"(?:把)?(?:当前|本任务|这个任务)?(?:档位|推理档位).{{0,8}}"
+        rf"(?:换成|改成|改为|调整为|调到|切换到){EFFORT_ROUTE_TARGET}"
+    ),
+    re.compile(
+        r"(?:^|[。！!，,；;：:])(?:请)?(?:把)?"
+        r"(?:(?:模型)?路由|路由策略|额度偏好|这次选型)?"
+        r"(?:改成|改为|调整为|切换为)"
+        r"(?:(?:优先)?(?:节省|省)(?:一点|一些)?额度|额度优先)"
+        r"(?=$|[。！!，,；;：:])"
+    ),
+    re.compile(
+        r"(?:^|[。！!，,；;：:])(?:请)?(?:把)?"
+        r"(?:(?:模型)?路由|路由策略|额度偏好|这次选型)?"
+        r"(?:改成|改为|调整为|切换为)"
+        r"(?:(?:优先)?(?:保证|保障|保)质量|质量优先)"
+        r"(?=$|[。！!，,；;：:])"
+    ),
+    re.compile(
+        r"(?:^|[。！!，,；;：:])(?:请)?(?:把)?"
+        r"(?:(?:模型)?路由|路由策略|额度偏好|这次选型)?"
+        r"(?:改成|改为|调整为|切换为|改回)"
+        r"(?:按推荐执行|平衡|均衡)"
+        r"(?=$|[。！!，,；;：:])"
+    ),
 )
 
 NEGATION_TERMS = (
@@ -106,8 +155,12 @@ NEGATION_TERMS = (
     "不用",
     "暂不",
     "先不",
+    "不是",
+    "并非",
+    "不想",
+    "没有",
+    "无意",
 )
-NEGATION_WINDOW_CHARS = 12
 NEGATION_SCOPE_BREAKERS = re.compile(
     r"(?:而是|但是|但|却|改为|转为|然后|随后|接下来|"
     r"拖延|等待|推迟|阻止|避免|拒绝|取消)"
@@ -166,7 +219,7 @@ def _is_simple_explanation(text: str) -> bool:
 def _match_is_negated(text: str, match: re.Match[str]) -> bool:
     prefix = text[: match.start()]
     clause_start = max(prefix.rfind(mark) for mark in "。！？!?，,；;：:\n")
-    local_prefix = prefix[clause_start + 1 :][-NEGATION_WINDOW_CHARS:]
+    local_prefix = prefix[clause_start + 1 :]
     candidates = [
         (local_prefix.rfind(term), term)
         for term in NEGATION_TERMS
@@ -188,7 +241,16 @@ def _is_user_route_request(text: str) -> bool:
 
 
 def _is_initial_selection(text: str) -> bool:
-    return INITIAL_SELECTION_PATTERN.match(_strip_terminal_punctuation(text)) is not None
+    decision_clause = re.split(r"(?<=[。！!；;\n])", text, maxsplit=1)[0]
+    if SELECTION_QUESTION_OR_ALTERNATIVE.search(decision_clause):
+        return False
+    if sum(decision_clause.count(choice) for choice in SELECTION_PHRASES) > 1:
+        return False
+    stripped = _strip_terminal_punctuation(decision_clause)
+    return bool(
+        INITIAL_SELECTION_PATTERN.match(stripped)
+        or EXPLICIT_CONFIGURATION_PATTERN.match(stripped)
+    )
 
 
 def _new_state() -> dict[str, Any]:
@@ -309,18 +371,6 @@ def _state_lock(state_dir: Path) -> Iterator[None]:
         finally:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def _prune_sessions(sessions: dict[str, Any]) -> None:
-    overflow = len(sessions) - MAX_SESSIONS
-    if overflow <= 0:
-        return
-    oldest = sorted(
-        sessions,
-        key=lambda key: str(sessions[key].get("last_seen_at", "")),
-    )
-    for key in oldest[:overflow]:
-        del sessions[key]
 
 
 def _session_counter(session: Optional[dict[str, Any]]) -> int:
@@ -518,7 +568,8 @@ def process_hook(
                 "route_selection_observed": selection_observed,
                 "last_seen_at": event_time,
             }
-            _prune_sessions(sessions)
+            # Do not evict old session records. Losing a record would make an
+            # archived task look new and violate the one-card-per-task policy.
 
             event = {
                 "schema_version": SCHEMA_VERSION,
