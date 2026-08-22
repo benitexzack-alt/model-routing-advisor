@@ -73,7 +73,8 @@ INITIAL_SELECTION_PATTERN = re.compile(
 
 SELECTION_PHRASES = ("按推荐执行", "优先节省额度", "优先保证质量")
 SELECTION_QUESTION_OR_ALTERNATIVE = re.compile(
-    r"(?:[？?]|还是|或者|或是|是否|要不要|可以吗|选哪个|选哪一个|哪个好|哪一个好)"
+    r"(?:[？?]|还是|或者|或是|是否|要不要|可以吗|行吗|好吗|对吗|"
+    r"能不能|可不可以|好不好|怎么样|选哪个|选哪一个|哪个好|哪一个好)"
 )
 
 MODEL_ROUTE_OBJECT = (
@@ -259,8 +260,10 @@ def _decision_clause(text: str) -> str:
 
 def _normalize_final_still_decision(decision_clause: str) -> str:
     return re.sub(
-        r"^((?:(?:好的?|确认|可以|同意)[，,]?)?)还是"
-        r"(?=(?:按推荐执行|优先节省额度|优先保证质量))",
+        r"^((?:(?:好的?|确认|可以|同意)[，,]?)?)(?:那我|我|那)?还是"
+        r"(?=(?:按推荐执行|优先节省额度|优先保证质量|"
+        r"(?:(?:用|使用|选择|选|改用|采用)|切换到|设为)?"
+        rf"{MODEL_ROUTE_TARGET}))",
         r"\1",
         decision_clause,
         count=1,

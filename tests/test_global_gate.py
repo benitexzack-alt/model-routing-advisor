@@ -531,6 +531,9 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             "按推荐执行；优先节省额度。",
             "按推荐执行；还是优先节省额度？",
             "使用 GPT-5.6-Sol high 可以吗？",
+            "按推荐执行，行吗",
+            "使用 Sol high，能不能",
+            "按推荐执行，好不好",
             "Sol high，Terra medium。",
         )
         for index, prompt_text in enumerate(prompts, start=1):
@@ -568,6 +571,9 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             "使用 GPT-5.6-Sol 的 high 档。",
             "我选择 Sol ultra。",
             "还是按推荐执行吧。",
+            "我还是按推荐执行吧。",
+            "那还是按推荐执行吧。",
+            "我还是用 Sol ultra 吧。",
             "按推荐执行。接下来可以继续吗？",
             "按推荐执行；继续执行测试。",
         )
