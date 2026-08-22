@@ -112,18 +112,44 @@ class Paths:
                 AGENTS_BEGIN,
                 "## 模型路由强制入口（MRA_GLOBAL_GATE_V1）",
                 "",
-                "不得依赖 Skill 自动匹配。每个新任务的首个非闲聊请求，以及现有任务发生阶段、范围、风险、动作权限或交付对象显著变化时，在任何实质性调查、规划、写文件、改代码、外部调用或现实行动前，必须完整读取：",
+                "不得依赖 Skill 自动匹配。每个新对话或新任务的首个非闲聊、实质请求，在任何实质性调查、规划、写文件、改代码、外部调用或现实行动前，必须完整读取：",
                 "",
                 "`%s`" % skill_path,
                 "",
-                "按该 Skill 生成模型路由卡并等待用户确认后，才可继续。确认前只允许完成路由分类所必需的只读核查，不得产生写入或外部副作用。",
+                "首次选型必须按该新对话或项目可预见完整生命周期中的最高复杂度和最高风险下限进行，确保固定路线能够覆盖后续阶段。按该 Skill 只生成一张模型路由卡并等待用户明确确认后，才可继续。确认前只允许完成路由分类所必需的只读核查，不得产生写入或外部副作用。",
                 "",
-                "同一阶段已有可定位的确认记录时沿用，不重复弹卡；普通寒暄、简单解释、微小追问可免路由。不得在找不到本任务已确认路由时声称“沿用”。Skill 缺失、不可读或返回 `needs-refresh` 时必须明确报告并停止实质执行，禁止静默跳过。",
+                "用户明确确认后，该对话后续的阶段、范围、风险、动作权限、交付对象变化以及归档恢复，默认沿用已经确认的模型与推理档位，不自动重问，也不再生成路由卡。同一 Codex 对话或任务只询问一次；新建独立对话或任务时再询问一次。只有用户明确要求改选或重新路由，或者已选模型或档位经当前运行时核验不可用时，才重新路由。",
                 "",
-                "重大项目的调查或规划本身也属于需要路由的阶段；方向确认后进入执行、部署或公开交付时重新路由。",
+                "用户尚未确认时，后续消息不得开始实质工作，也不得生成第二张路由卡；应明确指向本对话已有卡片并继续等待选择。若已有卡片不可定位，必须报告门禁状态异常并停止实质执行，不得伪造确认或沿用。普通寒暄、简单解释和微小追问可免路由。",
+                "",
+                "模型路由确认只决定模型与推理档位，不替代任何安全、权限、内容、发布、付款、部署或外部行动门禁；其他门禁及单独授权要求始终有效。Skill 缺失、不可读或返回 `needs-refresh` 时必须明确报告并停止实质执行，禁止静默跳过。",
                 AGENTS_END,
             ]
         )
+
+    @property
+    def legacy_agents_blocks(self) -> List[str]:
+        """Exact manager-owned blocks accepted for one-way migration."""
+        skill_path = self.codex_home / "skills" / "model-routing-advisor" / "SKILL.md"
+        return [
+            "\n".join(
+                [
+                    AGENTS_BEGIN,
+                    "## 模型路由强制入口（MRA_GLOBAL_GATE_V1）",
+                    "",
+                    "不得依赖 Skill 自动匹配。每个新任务的首个非闲聊请求，以及现有任务发生阶段、范围、风险、动作权限或交付对象显著变化时，在任何实质性调查、规划、写文件、改代码、外部调用或现实行动前，必须完整读取：",
+                    "",
+                    "`%s`" % skill_path,
+                    "",
+                    "按该 Skill 生成模型路由卡并等待用户确认后，才可继续。确认前只允许完成路由分类所必需的只读核查，不得产生写入或外部副作用。",
+                    "",
+                    "同一阶段已有可定位的确认记录时沿用，不重复弹卡；普通寒暄、简单解释、微小追问可免路由。不得在找不到本任务已确认路由时声称“沿用”。Skill 缺失、不可读或返回 `needs-refresh` 时必须明确报告并停止实质执行，禁止静默跳过。",
+                    "",
+                    "重大项目的调查或规划本身也属于需要路由的阶段；方向确认后进入执行、部署或公开交付时重新路由。",
+                    AGENTS_END,
+                ]
+            )
+        ]
 
     @property
     def hook_group(self) -> Dict[str, Any]:
@@ -261,11 +287,18 @@ def _managed_block_span(text: str) -> Optional[tuple]:
     return start, end
 
 
-def render_agents_install(text: str, block: str) -> str:
+def render_agents_install(
+    text: str, block: str, legacy_blocks: Optional[List[str]] = None
+) -> str:
     span = _managed_block_span(text)
     if span is not None:
         start, end = span
-        if text[start:end] != block:
+        current = text[start:end]
+        if current == block:
+            return text
+        if current in (legacy_blocks or []):
+            return text[:start] + block + text[end:]
+        if current != block:
             raise GateError("AGENTS.md 的模型路由标记块已被修改；拒绝覆盖")
         return text
 
@@ -282,12 +315,14 @@ def render_agents_install(text: str, block: str) -> str:
     return block + "\n\n" + text
 
 
-def render_agents_uninstall(text: str, block: str) -> str:
+def render_agents_uninstall(
+    text: str, block: str, legacy_blocks: Optional[List[str]] = None
+) -> str:
     span = _managed_block_span(text)
     if span is None:
         return text
     start, end = span
-    if text[start:end] != block:
+    if text[start:end] not in [block, *(legacy_blocks or [])]:
         raise GateError("AGENTS.md 的模型路由标记块已被修改；拒绝卸载")
     remove_end = end
     if text[remove_end : remove_end + 2] == "\n\n":
@@ -850,14 +885,21 @@ class GlobalGateManager:
     ) -> Dict[Path, Optional[bytes]]:
         agents_text = _read_text_or_empty(self.paths.agents)
         hooks_config = _load_hooks(self.paths.hooks)
-        desired_agents = render_agents_install(agents_text, self.paths.agents_block)
+        desired_agents = render_agents_install(
+            agents_text,
+            self.paths.agents_block,
+            self.paths.legacy_agents_blocks,
+        )
         desired_hooks = render_hooks_install(hooks_config, self.paths)
         if existing_state is not None:
             self._validate_state_identity(existing_state)
+        source_hash = sha256_bytes(source_data)
+        agents_block_hash = sha256_bytes(self.paths.agents_block.encode("utf-8"))
         if (
             existing_state is not None
-            and existing_state.get("source_sha256") == sha256_bytes(source_data)
-            and existing_state.get("target_sha256") == sha256_bytes(source_data)
+            and existing_state.get("source_sha256") == source_hash
+            and existing_state.get("target_sha256") == source_hash
+            and existing_state.get("agents_block_sha256") == agents_block_hash
         ):
             state = existing_state
         else:
@@ -867,9 +909,17 @@ class GlobalGateManager:
                     "installed_at", state["installed_at"]
                 )
                 state["upgraded_at"] = datetime.now(timezone.utc).isoformat()
-                state["upgraded_from_target_sha256"] = existing_state.get(
-                    "target_sha256"
-                )
+                if (
+                    existing_state.get("source_sha256") != source_hash
+                    or existing_state.get("target_sha256") != source_hash
+                ):
+                    state["upgraded_from_target_sha256"] = existing_state.get(
+                        "target_sha256"
+                    )
+                if existing_state.get("agents_block_sha256") != agents_block_hash:
+                    state["upgraded_from_agents_block_sha256"] = existing_state.get(
+                        "agents_block_sha256"
+                    )
                 for key in (
                     "hook_current_hash",
                     "trust_status",
@@ -927,6 +977,7 @@ class GlobalGateManager:
         for key in (
             "source_sha256",
             "target_sha256",
+            "agents_block_sha256",
         ):
             if state.get(key) != expected.get(key):
                 raise GateError("全局门状态或配置变化：%s" % key)
@@ -939,13 +990,21 @@ class GlobalGateManager:
             "source_hook",
             "target_hook",
             "agents_path",
-            "agents_block_sha256",
             "hooks_path",
             "hook_group_sha256",
             "hook_command",
         ):
             if state.get(key) != expected.get(key):
                 raise GateError("全局门状态或配置变化：%s" % key)
+        accepted_agents_hashes = {
+            expected["agents_block_sha256"],
+            *(
+                sha256_bytes(block.encode("utf-8"))
+                for block in self.paths.legacy_agents_blocks
+            ),
+        }
+        if state.get("agents_block_sha256") not in accepted_agents_hashes:
+            raise GateError("全局门状态或配置变化：agents_block_sha256")
         for key in ("source_sha256", "target_sha256"):
             value = state.get(key)
             if not isinstance(value, str) or not value.startswith("sha256:"):
@@ -1439,7 +1498,9 @@ class GlobalGateManager:
         hooks = _load_hooks(self.paths.hooks)
         desired = {
             self.paths.agents: render_agents_uninstall(
-                agents, self.paths.agents_block
+                agents,
+                self.paths.agents_block,
+                self.paths.legacy_agents_blocks,
             ).encode("utf-8"),
             self.paths.hooks: _json_bytes(render_hooks_uninstall(hooks, self.paths)),
             self.paths.target_hook: None,

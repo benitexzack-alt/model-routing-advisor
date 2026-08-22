@@ -1,4 +1,4 @@
 interface:
   display_name: "模型路由顾问"
-  short_description: "按任务阶段、风险、复杂度与额度成本推荐模型和推理档位"
-  default_prompt: "使用 $model-routing-advisor 先判断本轮是否需要新路由；需要时在实质执行前生成路由卡并等待确认，同阶段有效确认则沿用。"
+  short_description: "每个新对话只处方一次，确认后全程沿用"
+  default_prompt: "使用 $model-routing-advisor 判断这是否是本对话首次实质任务；首次只生成一张覆盖完整生命周期的路由卡并等待确认，已确认则静默沿用，只有用户明确改选或模型不可用时才重新路由。"

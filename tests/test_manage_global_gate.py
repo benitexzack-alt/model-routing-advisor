@@ -223,6 +223,26 @@ class GlobalGateManagerTests(unittest.TestCase):
         for path, content in before.items():
             self.assertEqual(path.read_bytes(), content)
 
+    def test_agents_block_requires_one_sticky_route_per_codex_task(self) -> None:
+        block = self.paths.agents_block
+
+        for required in (
+            "可预见完整生命周期中的最高复杂度和最高风险下限",
+            "只生成一张模型路由卡并等待用户明确确认",
+            "归档恢复",
+            "不自动重问，也不再生成路由卡",
+            "同一 Codex 对话或任务只询问一次",
+            "新建独立对话或任务时再询问一次",
+            "用户明确要求改选或重新路由",
+            "已选模型或档位经当前运行时核验不可用",
+            "不得生成第二张路由卡",
+            "已有卡片不可定位",
+            "不替代任何安全、权限、内容、发布、付款、部署或外部行动门禁",
+        ):
+            self.assertIn(required, block)
+        self.assertNotIn("现有任务发生阶段、范围、风险", block)
+        self.assertNotIn("进入执行、部署或公开交付时重新路由", block)
+
     def test_dry_run_writes_nothing(self) -> None:
         before_agents = self.paths.agents.read_bytes()
         before_hooks = self.paths.hooks.read_bytes()
@@ -544,6 +564,78 @@ class GlobalGateManagerTests(unittest.TestCase):
         )
         self.assertNotEqual(new_state["target_sha256"], old_state["target_sha256"])
         self.assertIsNotNone(installed.backup_id)
+
+    def test_install_safely_upgrades_legacy_agents_block_and_old_hook(self) -> None:
+        self.manager_with_trusted_rpc().install(trust=False)
+        legacy_block = self.paths.legacy_agents_blocks[0]
+        legacy_block_hash = gate_module.sha256_bytes(legacy_block.encode("utf-8"))
+        agents = self.paths.agents.read_text(encoding="utf-8")
+        self.paths.agents.write_text(
+            agents.replace(self.paths.agents_block, legacy_block),
+            encoding="utf-8",
+        )
+        legacy_state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        legacy_state["agents_block_sha256"] = legacy_block_hash
+        self.paths.state.write_text(json.dumps(legacy_state), encoding="utf-8")
+        legacy_agents_bytes = self.paths.agents.read_bytes()
+        legacy_state_bytes = self.paths.state.read_bytes()
+        old_target = self.paths.target_hook.read_bytes()
+        old_hooks_bytes = self.paths.hooks.read_bytes()
+        self.source.write_text(
+            "#!/usr/bin/env python3\nprint('{\"v\": 2}')\n", encoding="utf-8"
+        )
+
+        upgraded = self.manager_with_trusted_rpc().install(trust=False)
+
+        self.assertTrue(upgraded.changed)
+        self.assertIsNotNone(upgraded.backup_id)
+        upgraded_agents = self.paths.agents.read_text(encoding="utf-8")
+        self.assertEqual(upgraded_agents.count(self.paths.agents_block), 1)
+        self.assertNotIn(legacy_block, upgraded_agents)
+        self.assertIn("# 用户原有规则", upgraded_agents)
+        self.assertIn("- 保留这一行。", upgraded_agents)
+        self.assertEqual(self.paths.hooks.read_bytes(), old_hooks_bytes)
+        self.assertNotEqual(self.paths.target_hook.read_bytes(), old_target)
+        self.assertEqual(self.paths.target_hook.read_bytes(), self.source.read_bytes())
+        upgraded_state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        self.assertEqual(
+            upgraded_state["agents_block_sha256"],
+            gate_module.sha256_bytes(self.paths.agents_block.encode("utf-8")),
+        )
+        self.assertEqual(
+            upgraded_state["upgraded_from_agents_block_sha256"], legacy_block_hash
+        )
+        self.assertEqual(
+            upgraded_state["upgraded_from_target_sha256"],
+            legacy_state["target_sha256"],
+        )
+
+        GlobalGateManager(self.paths).rollback(upgraded.backup_id)
+        self.assertEqual(self.paths.agents.read_bytes(), legacy_agents_bytes)
+        self.assertEqual(self.paths.hooks.read_bytes(), old_hooks_bytes)
+        self.assertEqual(self.paths.target_hook.read_bytes(), old_target)
+        self.assertEqual(self.paths.state.read_bytes(), legacy_state_bytes)
+
+    def test_uninstall_accepts_exact_legacy_agents_block_and_state(self) -> None:
+        self.manager_with_trusted_rpc().install(trust=False)
+        legacy_block = self.paths.legacy_agents_blocks[0]
+        agents = self.paths.agents.read_text(encoding="utf-8")
+        self.paths.agents.write_text(
+            agents.replace(self.paths.agents_block, legacy_block),
+            encoding="utf-8",
+        )
+        state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        state["agents_block_sha256"] = gate_module.sha256_bytes(
+            legacy_block.encode("utf-8")
+        )
+        self.paths.state.write_text(json.dumps(state), encoding="utf-8")
+
+        result = self.manager_with_trusted_rpc().uninstall()
+
+        self.assertTrue(result.changed)
+        self.assertEqual(self.paths.agents.read_text(encoding="utf-8"), self.original_agents)
+        self.assertFalse(self.paths.target_hook.exists())
+        self.assertFalse(self.paths.state.exists())
 
     def test_trusted_upgrade_migrates_legacy_restore_state_without_stale_hash(self) -> None:
         target_key = f"{self.paths.hooks}:user_prompt_submit:0:0"

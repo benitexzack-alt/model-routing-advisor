@@ -85,28 +85,56 @@ class GlobalGateBehaviorTests(unittest.TestCase):
                 self.assertNotIn(prompt, state_text)
                 self.assertNotIn(prompt, log_lines[0])
 
-    def test_obvious_chat_and_simple_explanation_skip(self) -> None:
+    def test_chat_and_simple_explanation_do_not_consume_first_route_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
-            chat = process_hook(payload("你好", session_id="chat"), state_dir=state_dir)
+            chat = process_hook(
+                payload("你好", session_id="chat", turn_id="chat-1"),
+                state_dir=state_dir,
+            )
+            after_chat = process_hook(
+                payload(
+                    "开始整理客户数据。",
+                    session_id="chat",
+                    turn_id="chat-2",
+                ),
+                state_dir=state_dir,
+            )
             explanation = process_hook(
-                payload("什么是依赖注入？", session_id="explain"), state_dir=state_dir
+                payload(
+                    "什么是依赖注入？",
+                    session_id="explain",
+                    turn_id="explain-1",
+                ),
+                state_dir=state_dir,
+            )
+            after_explanation = process_hook(
+                payload(
+                    "开始开发依赖注入示例。",
+                    session_id="explain",
+                    turn_id="explain-2",
+                ),
+                state_dir=state_dir,
             )
 
             self.assertIsNone(injected_context(chat))
+            self.assertIn('reason="new_task"', injected_context(after_chat))
             self.assertIsNone(injected_context(explanation))
+            self.assertIn('reason="new_task"', injected_context(after_explanation))
             events = [
                 json.loads(line)
                 for line in (state_dir / "gate-events.jsonl")
                 .read_text(encoding="utf-8")
                 .splitlines()
             ]
-            self.assertEqual([event["reason"] for event in events], ["chat", "simple_explanation"])
-            self.assertTrue(all(event["decision"] == "skip" for event in events))
+            self.assertEqual(
+                [event["reason"] for event in events],
+                ["chat", "new_task", "simple_explanation", "new_task"],
+            )
 
-    def test_archived_resume_rechecks_existing_session(self) -> None:
+    def test_confirmation_and_archived_resume_do_not_repeat_route_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
@@ -123,17 +151,28 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             )
 
             self.assertIn('reason="new_task"', injected_context(first))
-            self.assertIn('reason="continuity_check"', injected_context(acknowledged))
-            self.assertIn('reason="resume"', injected_context(resumed))
+            self.assertIsNone(injected_context(acknowledged))
+            self.assertIsNone(injected_context(resumed))
 
             state = json.loads(
                 (state_dir / "gate-state.json").read_text(encoding="utf-8")
             )
             session = state["sessions"]["session-1"]
             self.assertNotIn("confirmed", json.dumps(session, ensure_ascii=False).lower())
-            self.assertNotIn("last_trigger_signature", session)
+            self.assertTrue(session["route_prompt_shown"])
+            self.assertTrue(session["route_selection_observed"])
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                [event["reason"] for event in events],
+                ["new_task", "route_already_set", "route_already_set"],
+            )
 
-    def test_same_stage_three_followups_are_checked_without_forcing_reroute(self) -> None:
+    def test_same_stage_followups_do_not_repeat_route_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
@@ -142,36 +181,35 @@ class GlobalGateBehaviorTests(unittest.TestCase):
                 payload("现在开始实现数据导入功能。", turn_id="turn-1"),
                 state_dir=state_dir,
             )
+            confirmation = process_hook(
+                payload("按推荐执行。", turn_id="turn-2"), state_dir=state_dir
+            )
             followups = [
                 process_hook(
                     payload(text, turn_id=f"turn-{index}"), state_dir=state_dir
                 )
                 for index, text in enumerate(
-                    ["按推荐执行。", "继续完善错误提示。", "再补一个本地单元测试。"],
-                    start=2,
+                    ["继续完善错误提示。", "再补一个本地单元测试。"],
+                    start=3,
                 )
             ]
 
             self.assertIn('reason="new_task"', injected_context(first))
-            self.assertTrue(all(injected_context(result) is not None for result in followups))
-            self.assertTrue(
-                all(
-                    'reason="continuity_check"' in injected_context(result)
-                    for result in followups
-                )
-            )
-            self.assertTrue(
-                all("同阶段已确认则静默沿用" in injected_context(result) for result in followups)
-            )
+            self.assertIsNone(injected_context(confirmation))
+            self.assertTrue(all(injected_context(result) is None for result in followups))
             events = [
                 json.loads(line)
                 for line in (state_dir / "gate-events.jsonl")
                 .read_text(encoding="utf-8")
                 .splitlines()
             ]
-            self.assertEqual(sum(event["decision"] == "inject" for event in events), 4)
+            self.assertEqual(sum(event["decision"] == "inject" for event in events), 1)
+            self.assertEqual(
+                [event["reason"] for event in events[1:]],
+                ["route_already_set", "route_already_set", "route_already_set"],
+            )
 
-    def test_explicit_stage_change_rechecks_once(self) -> None:
+    def test_explicit_stage_change_does_not_repeat_route_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
@@ -180,18 +218,29 @@ class GlobalGateBehaviorTests(unittest.TestCase):
                 payload("现在开始实现导入功能。", turn_id="turn-1"),
                 state_dir=state_dir,
             )
+            process_hook(
+                payload("按推荐执行。", turn_id="turn-2"), state_dir=state_dir
+            )
             changed = process_hook(
-                payload("现在进入验证阶段，运行回归测试。", turn_id="turn-2"),
+                payload("现在进入验证阶段，运行回归测试。", turn_id="turn-3"),
                 state_dir=state_dir,
             )
             continued = process_hook(
-                payload("继续验证边界条件。", turn_id="turn-3"), state_dir=state_dir
+                payload("继续验证边界条件。", turn_id="turn-4"), state_dir=state_dir
             )
 
-            self.assertIn('reason="stage_change"', injected_context(changed))
-            self.assertIn('reason="continuity_check"', injected_context(continued))
+            self.assertIsNone(injected_context(changed))
+            self.assertIsNone(injected_context(continued))
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(events[-2]["reason"], "route_already_set")
+            self.assertEqual(events[-1]["reason"], "route_already_set")
 
-    def test_high_risk_request_rechecks_before_action(self) -> None:
+    def test_high_risk_change_does_not_repeat_route_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
@@ -200,12 +249,21 @@ class GlobalGateBehaviorTests(unittest.TestCase):
                 payload("先整理本地部署清单。", turn_id="turn-1"),
                 state_dir=state_dir,
             )
+            process_hook(
+                payload("按推荐执行。", turn_id="turn-2"), state_dir=state_dir
+            )
             risky = process_hook(
-                payload("现在直接部署到生产环境并重启服务。", turn_id="turn-2"),
+                payload("现在直接部署到生产环境并重启服务。", turn_id="turn-3"),
                 state_dir=state_dir,
             )
 
-            self.assertIn('reason="high_risk"', injected_context(risky))
+            self.assertIsNone(injected_context(risky))
+            event = json.loads(
+                (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[-1]
+            )
+            self.assertEqual(event["reason"], "route_already_set")
 
     def test_micro_followup_skips(self) -> None:
         from tempfile import TemporaryDirectory
@@ -218,50 +276,77 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             )
             self.assertIsNone(injected_context(result))
 
-    def test_negated_production_action_is_not_labeled_high_risk(self) -> None:
+    def test_messages_before_first_selection_do_not_repeat_pending_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
             process_hook(payload("先分析本地方案。"), state_dir=state_dir)
             result = process_hook(
-                payload("不要部署到生产环境，先保留本地方案。", turn_id="turn-2"),
+                payload("现在进入执行阶段。", turn_id="turn-2"),
+                state_dir=state_dir,
+            )
+            premature_reroute = process_hook(
+                payload("重新选一下模型。", turn_id="turn-3"),
                 state_dir=state_dir,
             )
 
-            context = injected_context(result)
-            self.assertIn('reason="continuity_check"', context)
-            self.assertNotIn('reason="high_risk"', context)
+            self.assertIsNone(injected_context(result))
+            self.assertIsNone(injected_context(premature_reroute))
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(events[-2]["reason"], "route_prompt_pending")
+            self.assertEqual(events[-1]["reason"], "route_prompt_pending")
 
-    def test_earlier_negated_action_does_not_hide_current_high_risk_intent(self) -> None:
+    def test_negated_model_change_does_not_request_reroute(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
             process_hook(payload("先分析本地方案。"), state_dir=state_dir)
+            process_hook(
+                payload("按推荐执行。", turn_id="turn-2"), state_dir=state_dir
+            )
             result = process_hook(
-                payload("不要拖延现在部署到生产环境。", turn_id="turn-2"),
+                payload("不要重新选模型，继续执行。", turn_id="turn-3"),
                 state_dir=state_dir,
             )
 
-            self.assertIn('reason="high_risk"', injected_context(result))
+            self.assertIsNone(injected_context(result))
+            event = json.loads(
+                (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[-1]
+            )
+            self.assertEqual(event["reason"], "route_already_set")
 
-    def test_second_independent_task_in_same_session_is_not_silently_skipped(self) -> None:
+    def test_second_independent_task_in_same_session_reuses_route(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
             process_hook(payload("分析第一个项目。"), state_dir=state_dir)
+            process_hook(
+                payload("按推荐执行。", turn_id="turn-2"), state_dir=state_dir
+            )
             result = process_hook(
-                payload("帮我整理另一批客户访谈记录。", turn_id="turn-2"),
+                payload("帮我整理另一批客户访谈记录。", turn_id="turn-3"),
                 state_dir=state_dir,
             )
 
-            context = injected_context(result)
-            self.assertIsNotNone(context)
-            self.assertIn('reason="continuity_check"', context)
+            self.assertIsNone(injected_context(result))
+            event = json.loads(
+                (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[-1]
+            )
+            self.assertEqual(event["reason"], "route_already_set")
 
-    def test_duplicate_host_invocation_skips_but_same_prompt_new_turn_rechecks(self) -> None:
+    def test_duplicate_host_invocation_and_later_turn_do_not_repeat_prompt(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp_dir:
@@ -277,7 +362,7 @@ class GlobalGateBehaviorTests(unittest.TestCase):
 
             self.assertIn('reason="new_task"', injected_context(first))
             self.assertIsNone(injected_context(duplicate))
-            self.assertIn('reason="continuity_check"', injected_context(next_turn))
+            self.assertIsNone(injected_context(next_turn))
 
             events = [
                 json.loads(line)
@@ -287,12 +372,187 @@ class GlobalGateBehaviorTests(unittest.TestCase):
             ]
             self.assertEqual(
                 [event["reason"] for event in events],
-                ["new_task", "duplicate_hook_invocation", "continuity_check"],
+                ["new_task", "duplicate_hook_invocation", "route_prompt_pending"],
             )
             state = json.loads(
                 (state_dir / "gate-state.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(state["sessions"]["session-1"]["check_count"], 2)
+            session = state["sessions"]["session-1"]
+            self.assertEqual(session["route_prompt_count"], 1)
+            self.assertTrue(session["route_prompt_shown"])
+            self.assertFalse(session["route_selection_observed"])
+
+    def test_three_initial_choice_phrases_never_trigger_a_second_route_prompt(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        choices = ("按推荐执行", "优先节省额度", "优先保证质量")
+        for index, choice in enumerate(choices, start=1):
+            with self.subTest(choice=choice), TemporaryDirectory() as temp_dir:
+                state_dir = Path(temp_dir)
+                session_id = f"choice-{index}"
+                first = process_hook(
+                    payload("开始一个新的项目。", session_id=session_id),
+                    state_dir=state_dir,
+                )
+                selected = process_hook(
+                    payload(choice, session_id=session_id, turn_id="turn-2"),
+                    state_dir=state_dir,
+                )
+
+                self.assertIn('reason="new_task"', injected_context(first))
+                self.assertIsNone(injected_context(selected))
+                event = json.loads(
+                    (state_dir / "gate-events.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()[-1]
+                )
+                self.assertEqual(event["reason"], "route_already_set")
+                state = json.loads(
+                    (state_dir / "gate-state.json").read_text(encoding="utf-8")
+                )
+                session = state["sessions"][session_id]
+                self.assertTrue(session["route_selection_observed"])
+                self.assertEqual(session["route_prompt_count"], 1)
+
+    def test_explicit_change_after_selection_can_request_one_new_route_prompt(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        requests = (
+            "重选模型",
+            "重新选一下模型",
+            "把模型换成 Terra",
+            "改成优先节省额度",
+            "改成优先保证质量",
+            "再给我一张模型路由卡",
+        )
+        for index, request in enumerate(requests, start=1):
+            with self.subTest(request=request), TemporaryDirectory() as temp_dir:
+                state_dir = Path(temp_dir)
+                session_id = f"reroute-{index}"
+                process_hook(
+                    payload("开始一个新的项目。", session_id=session_id),
+                    state_dir=state_dir,
+                )
+                process_hook(
+                    payload(
+                        "按推荐执行。",
+                        session_id=session_id,
+                        turn_id="turn-2",
+                    ),
+                    state_dir=state_dir,
+                )
+                rerouted = process_hook(
+                    payload(request, session_id=session_id, turn_id="turn-3"),
+                    state_dir=state_dir,
+                )
+                pending_followup = process_hook(
+                    payload(
+                        request,
+                        session_id=session_id,
+                        turn_id="turn-4",
+                    ),
+                    state_dir=state_dir,
+                )
+
+                self.assertIn('reason="user_requested"', injected_context(rerouted))
+                self.assertIsNone(injected_context(pending_followup))
+                events = [
+                    json.loads(line)
+                    for line in (state_dir / "gate-events.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ]
+                self.assertEqual(events[-1]["reason"], "route_prompt_pending")
+                state = json.loads(
+                    (state_dir / "gate-state.json").read_text(encoding="utf-8")
+                )
+                session = state["sessions"][session_id]
+                self.assertFalse(session["route_selection_observed"])
+                self.assertEqual(session["route_prompt_count"], 2)
+
+    def test_legacy_check_count_migrates_to_sticky_route_without_duplicate(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            legacy_prompt = "旧版本已经展示过路由卡。"
+            legacy_state = {
+                "schema_version": 1,
+                "sessions": {
+                    "legacy-session": {
+                        "session_id": "legacy-session",
+                        "turn_id": "legacy-turn",
+                        "cwd": "/tmp/example-project",
+                        "last_prompt_sha256": hashlib.sha256(
+                            legacy_prompt.encode("utf-8")
+                        ).hexdigest(),
+                        "last_decision": "inject",
+                        "last_reason": "new_task",
+                        "last_observed_signature": "stage:general",
+                        "check_count": 1,
+                        "last_seen_at": "2026-08-23T00:00:00+00:00",
+                    }
+                },
+            }
+            (state_dir / "gate-state.json").write_text(
+                json.dumps(legacy_state, ensure_ascii=False), encoding="utf-8"
+            )
+
+            result = process_hook(
+                payload(
+                    "继续执行。",
+                    session_id="legacy-session",
+                    turn_id="new-turn",
+                ),
+                state_dir=state_dir,
+            )
+
+            self.assertIsNone(injected_context(result))
+            first_event = json.loads(
+                (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[-1]
+            )
+            self.assertEqual(first_event["reason"], "route_already_set")
+
+            reroute = process_hook(
+                payload(
+                    "重新选一下模型。",
+                    session_id="legacy-session",
+                    turn_id="reroute-turn",
+                ),
+                state_dir=state_dir,
+            )
+            self.assertIn('reason="user_requested"', injected_context(reroute))
+            event = json.loads(
+                (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[-1]
+            )
+            self.assertEqual(event["reason"], "user_requested")
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            migrated = state["sessions"]["legacy-session"]
+            self.assertTrue(migrated["route_prompt_shown"])
+            self.assertEqual(migrated["route_prompt_count"], 2)
+            self.assertFalse(migrated["route_selection_observed"])
+            self.assertNotIn("check_count", migrated)
+
+    def test_each_session_gets_its_own_first_route_prompt(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            first = process_hook(
+                payload("开始项目甲。", session_id="session-a"), state_dir=state_dir
+            )
+            second = process_hook(
+                payload("开始项目乙。", session_id="session-b"), state_dir=state_dir
+            )
+
+            self.assertIn('reason="new_task"', injected_context(first))
+            self.assertIn('reason="new_task"', injected_context(second))
 
     def test_bad_payload_warns_and_fails_open(self) -> None:
         from tempfile import TemporaryDirectory

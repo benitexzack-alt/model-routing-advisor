@@ -65,9 +65,31 @@ EXPLANATION_PREFIXES = (
     "有什么区别",
 )
 
-RESUME_PATTERNS = (
-    re.compile(r"(?:恢复|重新打开|重新开始).{0,12}(?:归档|任务|项目|工作)"),
-    re.compile(r"(?:归档恢复|从归档中恢复|继续上次|接着上次|回到上次)"),
+INITIAL_SELECTION_PATTERN = re.compile(
+    r"^(?:好的[，,]?|确认)?(?:按推荐执行|优先节省额度|优先保证质量)$"
+)
+
+USER_ROUTE_REQUEST_PATTERNS = (
+    re.compile(r"重选(?:一下|一次|一遍)?(?:模型|档位|推理档位)"),
+    re.compile(
+        r"(?:重新|再次|再)(?:选|选择|推荐|评估)"
+        r"(?:一下|一次|一遍)?(?:模型|档位|推理档位)"
+    ),
+    re.compile(
+        r"(?:重新|再次|再)(?:给我|生成|做)?(?:一张|一次|一遍)?"
+        r"(?:模型)?(?:路由卡|路由|选型)"
+    ),
+    re.compile(r"(?:换|更换)(?:一个|个|一下)?模型"),
+    re.compile(
+        r"(?:把)?(?:模型|档位|推理档位).{0,8}"
+        r"(?:换成|改成|改为|调整为|调到|切换到)"
+    ),
+    re.compile(
+        r"(?:换成|改成|改为|调整为|切换为|切换到).{0,8}"
+        r"(?:gpt[-\w.]*|sol|terra|luna|spark)"
+    ),
+    re.compile(r"(?:改成|改为|调整为|切换为)(?:优先)?(?:节省|省)(?:一点|一些)?额度"),
+    re.compile(r"(?:改成|改为|调整为|切换为)(?:优先)?(?:保证|保障|保)质量"),
 )
 
 NEGATION_TERMS = (
@@ -79,6 +101,7 @@ NEGATION_TERMS = (
     "不需要",
     "不能",
     "别",
+    "不用",
     "暂不",
     "先不",
 )
@@ -87,51 +110,6 @@ NEGATION_SCOPE_BREAKERS = re.compile(
     r"(?:而是|但是|但|却|改为|转为|然后|随后|接下来|"
     r"拖延|等待|推迟|阻止|避免|拒绝|取消)"
 )
-
-HIGH_RISK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "deploy",
-        re.compile(
-            r"(?:直接|立即|马上|现在|开始|请|帮我)?(?:部署|上线|发布)"
-            r".{0,12}(?:生产环境|线上环境|正式环境|服务器)"
-            r"|(?:重启|停止|切换|切流).{0,8}(?:生产|线上|服务|服务器)"
-        ),
-    ),
-    (
-        "payment",
-        re.compile(r"(?:直接|立即|现在|请|帮我|执行)?(?:付款|支付|购买|下单|签约|签署合同)"),
-    ),
-    (
-        "destructive",
-        re.compile(
-            r"(?:直接|立即|现在|请|帮我|执行)?"
-            r"(?:删除|清空|销毁|永久移除|覆盖).{0,20}(?:数据|文件|仓库|记录|账户|环境|目录)"
-        ),
-    ),
-    (
-        "external",
-        re.compile(
-            r"(?:发送|发给|提交给|公开发布|正式发布|交付)"
-            r".{0,20}(?:客户|外部|公众|平台|审核方|合作方)"
-        ),
-    ),
-    (
-        "sensitive",
-        re.compile(
-            r"(?:上传|发送|公开|提交|处理).{0,20}"
-            r"(?:密码|密钥|隐私|身份证|手机号|客户数据|个人信息)"
-        ),
-    ),
-)
-
-STAGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("investigate", re.compile(r"(?:进入|切换到|开始|转入).{0,6}(?:调研|调查|取证)阶段?")),
-    ("plan", re.compile(r"(?:进入|切换到|开始|转入).{0,6}(?:规划|方案|设计)阶段?")),
-    ("execute", re.compile(r"(?:进入|切换到|开始|转入).{0,6}(?:开发|实现|执行|制作)阶段?")),
-    ("verify", re.compile(r"(?:进入|切换到|开始|转入).{0,6}(?:测试|验证|验收|回归)阶段?")),
-    ("deploy", re.compile(r"(?:进入|切换到|开始|转入).{0,6}(?:部署|上线|发布)阶段?")),
-)
-
 
 class HookInputError(ValueError):
     """Raised when UserPromptSubmit input is unusable."""
@@ -183,10 +161,6 @@ def _is_simple_explanation(text: str) -> bool:
     return text.startswith(EXPLANATION_PREFIXES)
 
 
-def _is_resume(text: str) -> bool:
-    return any(pattern.search(text) for pattern in RESUME_PATTERNS)
-
-
 def _match_is_negated(text: str, match: re.Match[str]) -> bool:
     prefix = text[: match.start()]
     clause_start = max(prefix.rfind(mark) for mark in "。！？!?，,；;：:\n")
@@ -203,20 +177,16 @@ def _match_is_negated(text: str, match: re.Match[str]) -> bool:
     return NEGATION_SCOPE_BREAKERS.search(intervening) is None
 
 
-def _risk_signature(text: str) -> Optional[str]:
-    for name, pattern in HIGH_RISK_PATTERNS:
+def _is_user_route_request(text: str) -> bool:
+    for pattern in USER_ROUTE_REQUEST_PATTERNS:
         for match in pattern.finditer(text):
             if not _match_is_negated(text, match):
-                return f"risk:{name}"
-    return None
+                return True
+    return False
 
 
-def _stage_signature(text: str) -> Optional[str]:
-    for name, pattern in STAGE_PATTERNS:
-        for match in pattern.finditer(text):
-            if not _match_is_negated(text, match):
-                return f"stage:{name}"
-    return None
+def _is_initial_selection(text: str) -> bool:
+    return INITIAL_SELECTION_PATTERN.fullmatch(_strip_terminal_punctuation(text)) is not None
 
 
 def _new_state() -> dict[str, Any]:
@@ -351,42 +321,100 @@ def _prune_sessions(sessions: dict[str, Any]) -> None:
         del sessions[key]
 
 
+def _session_counter(session: Optional[dict[str, Any]]) -> int:
+    if not session:
+        return 0
+    for field in ("route_prompt_count", "injection_count", "check_count"):
+        if field not in session:
+            continue
+        value = session[field]
+        if type(value) is not int or value < 0:
+            raise GateStateError("invalid_route_prompt_count")
+        return value
+    return 0
+
+
+def _session_flag(
+    session: Optional[dict[str, Any]],
+    field: str,
+    *,
+    default: bool,
+) -> bool:
+    if not session or field not in session:
+        return default
+    value = session[field]
+    if type(value) is not bool:
+        raise GateStateError(f"invalid_{field}")
+    return value
+
+
+def _route_prompt_shown(session: Optional[dict[str, Any]]) -> bool:
+    return _session_flag(
+        session,
+        "route_prompt_shown",
+        default=_session_counter(session) > 0,
+    )
+
+
+def _route_selection_observed(session: Optional[dict[str, Any]]) -> bool:
+    # New state records only that the hook saw one of the three choice phrases;
+    # it is not evidence that the runtime applied a model or effort setting.
+    # Legacy state predates this field, so a prior injected card is migrated as
+    # sticky instead of trapping an existing conversation in pending forever.
+    if not session:
+        return False
+    return _session_flag(
+        session,
+        "route_selection_observed",
+        default=_session_counter(session) > 0,
+    )
+
+
 def _decide(
     prompt: str,
     session: Optional[dict[str, Any]],
-) -> tuple[str, str, Optional[str]]:
+) -> tuple[str, str, Optional[str], bool]:
     text = _normalize_for_match(prompt)
-    risk = _risk_signature(text)
-    stage = _stage_signature(text)
     last_signature = session.get("last_observed_signature") if session else None
+    prompt_shown = _route_prompt_shown(session)
+    selection_observed = _route_selection_observed(session)
 
-    if risk is None and _is_chat(text):
-        return "skip", "chat", last_signature
-    if risk is None and stage is None and _is_simple_explanation(text):
-        return "skip", "simple_explanation", last_signature
+    if not prompt_shown:
+        if _is_chat(text):
+            return "skip", "chat", last_signature, False
+        if _is_simple_explanation(text):
+            return "skip", "simple_explanation", last_signature, False
+        return "inject", "new_task", "routing:initial", False
 
-    has_prior_check = bool(session and int(session.get("check_count", 0)) > 0)
-    if not has_prior_check:
-        signature = risk or stage or "stage:general"
-        reason = "high_risk" if risk else "new_task"
-        return "inject", reason, signature
+    if not selection_observed:
+        if _is_initial_selection(text):
+            return "skip", "route_already_set", last_signature, True
+        return "skip", "route_prompt_pending", last_signature, False
 
-    if _is_resume(text):
-        return "inject", "resume", risk or stage or last_signature
-    if risk is not None:
-        return "inject", "high_risk", risk
-    if stage is not None:
-        if stage != last_signature:
-            return "inject", "stage_change", stage
-    return "inject", "continuity_check", stage or last_signature or "stage:general"
+    if _is_user_route_request(text):
+        return "inject", "user_requested", "routing:user_requested", False
+    return "skip", "route_already_set", last_signature, True
 
 
 def _gate_context(reason: str) -> str:
+    if reason == "user_requested":
+        instruction = (
+            "用户明确要求改选：调用 model-routing-advisor 重新给出路由卡并等待选择；"
+            "不得自动切换模型。"
+        )
+    elif reason == "new_task":
+        instruction = (
+            "本会话首次实质任务：执行前调用 model-routing-advisor 给出路由卡并等待选择。"
+            "之后仅在用户明确要求改选时重路由；不得自动切换模型。"
+        )
+    else:
+        instruction = (
+            "模型路由门禁状态异常：执行前人工检查 model-routing-advisor；"
+            "不得自动切换模型。"
+        )
     return (
         f'<model-routing-gate reason="{reason}">'
-        "执行前先调用 model-routing-advisor 检查本轮是否需新路由；"
-        "需要则先给路由卡并等待用户确认，同阶段已确认则静默沿用。"
-        "不得自动切换模型。"
+        f"{instruction}"
         "</model-routing-gate>"
     )
 
@@ -454,6 +482,10 @@ def process_hook(
             if session is not None and not isinstance(session, dict):
                 raise GateStateError("invalid_session_state")
 
+            prompt_count = _session_counter(session)
+            prompt_shown = _route_prompt_shown(session)
+            selection_observed = _route_selection_observed(session)
+
             is_duplicate = bool(
                 session
                 and session.get("turn_id") == payload["turn_id"]
@@ -464,10 +496,12 @@ def process_hook(
                 reason = "duplicate_hook_invocation"
                 signature = session.get("last_observed_signature")
             else:
-                decision, reason, signature = _decide(prompt, session)
-            check_count = int(session.get("check_count", 0)) if session else 0
+                decision, reason, signature, selection_observed = _decide(
+                    prompt, session
+                )
             if decision == "inject":
-                check_count += 1
+                prompt_count += 1
+                prompt_shown = True
 
             sessions[payload["session_id"]] = {
                 "session_id": payload["session_id"],
@@ -477,7 +511,9 @@ def process_hook(
                 "last_decision": decision,
                 "last_reason": reason,
                 "last_observed_signature": signature,
-                "check_count": check_count,
+                "route_prompt_count": prompt_count,
+                "route_prompt_shown": prompt_shown,
+                "route_selection_observed": selection_observed,
                 "last_seen_at": event_time,
             }
             _prune_sessions(sessions)
