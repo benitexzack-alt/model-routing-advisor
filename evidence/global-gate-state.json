@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "gate_id": "MRA_GLOBAL_GATE_V1",
-  "policy_version": "global-gate/1.1",
-  "status": "sticky_cli_app_server_canary_verified",
-  "validated_at": "2026-08-23T04:56:04+08:00",
-  "desktop_ui_acceptance": "pending_next_real_fresh_task",
-  "scope": "one_codex_conversation_or_task",
+  "policy_version": "global-gate/1.2",
+  "status": "sticky_routing_and_scheduled_automation_gate_installed_trusted",
+  "validated_at": "2026-08-25T01:14:28+08:00",
+  "desktop_ui_acceptance": "pending_next_real_scheduled_run",
+  "scope": "one_manual_codex_task_plus_verified_cron_and_sticky_heartbeat_rules",
   "initial_routing_basis": "highest_foreseeable_lifecycle_complexity_and_risk_floor",
   "sticky_policy": {
     "one_initial_card_per_scope": true,
@@ -14,6 +14,18 @@
     "second_work_item_in_same_scope_reuses_selection": true,
     "explicit_user_reroute_can_create_one_replacement_card": true,
     "runtime_verified_unavailability_can_create_one_replacement_card": true,
+    "separate_safety_and_action_gates_remain_active": true
+  },
+  "scheduled_automation_policy": {
+    "authoritative_cron_transcript_skips_route_card": true,
+    "cron_envelope_alone_cannot_create_exemption": true,
+    "manual_exact_cron_copy_routes_as_new_task": true,
+    "cron_model_and_effort_are_fixed_at_create_or_update": true,
+    "heartbeat_reuses_confirmed_target_task_route": true,
+    "heartbeat_envelope_alone_cannot_create_exemption": true,
+    "heartbeat_pending_target_keeps_one_existing_card": true,
+    "automation_manual_followup_is_not_labeled_scheduled_run": true,
+    "explicit_manual_reroute_can_create_one_replacement_card": true,
     "separate_safety_and_action_gates_remain_active": true
   },
   "user_decision": {
@@ -43,8 +55,8 @@
     "managed_hook_count": 1,
     "hook_key": "/Users/pc/.codex/hooks.json:user_prompt_submit:0:0",
     "hook_current_hash": "sha256:4d8291bddcbd0e36f6c0a408c4b9af633fea2fab02c8e649b31027b5f0bb1273",
-    "agents_block_sha256": "395e6012fca9717a02f2b88821295ef64642d5500895ce8214a364f23c96c9db",
-    "hook_file_sha256": "5cb4cb551f7dfbcfceb99cf4de03983a60362ed5395a51913de959a990b31f5d",
+    "agents_block_sha256": "626db0853608d1902a1ac4264058440ece577fd26bf39d1f47362a2fd9373330",
+    "hook_file_sha256": "e54c2532d2ab276a3d2ec0af3fab233c78df2b030c529263e1e83759afff6f59",
     "source_target_installed_skill_hook_match": true,
     "target_hook_mode": "0700",
     "runtime_state_directory_mode": "0700",
@@ -58,13 +70,14 @@
       "20260822T195106612935Z-install-9c4ba3ab",
       "20260822T204609725167Z-install-d319dc5f",
       "20260822T205243106664Z-install-98920bc9",
-      "20260822T205439610204Z-install-6ff05eda"
+      "20260822T205439610204Z-install-6ff05eda",
+      "20260824T171138984647Z-install-9355a7b5"
     ],
     "all_backups_rollback_dry_run_ok": true
   },
   "verification": {
-    "hook_and_manager_tests_system_python": "61/61",
-    "hook_and_manager_tests_current_python": "61/61",
+    "hook_and_manager_tests_system_python": "73/73",
+    "hook_and_manager_tests_current_python": "73/73",
     "router_tests_system_python": "16/16",
     "router_tests_current_python": "16/16",
     "trial_summary_tests_system_python": "27/27",
@@ -119,6 +132,25 @@
       "natural_final_decision_and_explicit_configuration_confirm": true,
       "installed_hook_direct_probe_passed": true
     },
+    "scheduled_automation_redteam": {
+      "p0": 0,
+      "p1": 0,
+      "nonblocking_p2": 2,
+      "manual_exact_cron_envelope_copy_rejected": true,
+      "legacy_pending_first_manual_reroute_not_swallowed": true,
+      "heartbeat_confirmed_and_pending_states_verified": true,
+      "unsafe_automation_config_permissions_rejected": true
+    },
+    "installed_scheduled_automation_probe": {
+      "used_production_hook_with_isolated_state": true,
+      "real_cron_reason": "scheduled_automation",
+      "real_cron_route_prompt_count": 0,
+      "manual_exact_copy_reason": "new_task",
+      "manual_exact_copy_route_prompt_count": 1,
+      "confirmed_daily_heartbeat_reason": "route_already_set",
+      "confirmed_daily_heartbeat_route_prompt_count": 1,
+      "next_real_scheduled_run_acceptance": "pending"
+    },
     "real_cli": {
       "thread_id": "01a02b03-ae2d-7ac2-90e6-0231b6ab5503",
       "first_new_task_card_visible": true,
@@ -153,7 +185,8 @@
     "5d60ce6",
     "11bd5ca",
     "bec2bef",
-    "97120e5"
+    "97120e5",
+    "7fb73ac"
   ],
   "boundaries": [
     "fail_open_reminder_not_pre_tool_hard_lock",
@@ -165,7 +198,11 @@
     "session_state_and_event_log_grow_without_lossy_eviction",
     "runtime_log_has_no_rotation_and_prompt_hash_is_not_anonymization",
     "real_global_rollback_was_dry_run_only",
-    "desktop_full_card_ui_acceptance_pending"
+    "desktop_full_card_ui_acceptance_pending",
+    "next_real_scheduled_run_acceptance_pending",
+    "automation_transcript_provenance_and_validated_run_share_one_persistent_flag",
+    "automation_config_parent_directory_chain_not_yet_permission_checked",
+    "ai_8_existing_schedule_timezone_observation_not_changed"
   ],
   "preexisting_unrelated_missing_hooks": [
     "/Users/pc/.codex/hooks/post-todowrite.sh",
