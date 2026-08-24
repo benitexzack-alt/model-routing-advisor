@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -30,6 +31,26 @@ STATE_FILENAME = "gate-state.json"
 LOG_FILENAME = "gate-events.jsonl"
 LOCK_FILENAME = ".gate.lock"
 STATE_DIR_ENV = "MODEL_ROUTING_GATE_STATE_DIR"
+MAX_SESSION_META_BYTES = 1024 * 1024
+MAX_AUTOMATION_CONFIG_BYTES = 1024 * 1024
+
+AUTOMATION_ID_TEXT = r"[A-Za-z0-9._-]+"
+CRON_ENVELOPE_PATTERN = re.compile(
+    rf"\AAutomation: (?P<name>[^\r\n]+)\r?\n"
+    rf"Automation ID: (?P<id>{AUTOMATION_ID_TEXT})\r?\n"
+    r"Automation memory: \$CODEX_HOME/automations/(?P=id)/memory\.md\r?\n"
+    r"Last run: (?:never|"
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z \(\d+\))\r?\n"
+    r"\r?\n"
+    r"(?P<instructions>[\s\S]+)\Z"
+)
+AUTOMATION_CONFIG_STRING_LINE = re.compile(
+    r"^(?P<key>id|kind|name|prompt|status|model|reasoning_effort)"
+    r"\s*=\s*(?P<value>\"(?:[^\"\\]|\\.)*\")\s*$"
+)
+AUTOMATION_CONFIG_CWDS_LINE = re.compile(
+    r"^cwds\s*=\s*(?P<value>\[(?:[^\"\\]|\"(?:[^\"\\]|\\.)*\")*\])\s*$"
+)
 
 REQUIRED_TEXT_FIELDS = ("session_id", "turn_id", "cwd", "prompt")
 
@@ -217,7 +238,209 @@ def _validate_payload(raw: Any) -> dict[str, str]:
         if not isinstance(value, str) or not value.strip():
             raise HookInputError(f"missing_or_invalid_{field}")
         result[field] = value
+    transcript_path = raw.get("transcript_path")
+    if isinstance(transcript_path, str):
+        result["transcript_path"] = transcript_path
     return result
+
+
+def _codex_home() -> Path:
+    configured = os.environ.get("CODEX_HOME")
+    return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_authoritative_automation_transcript(
+    transcript_path: Optional[str],
+    session_id: str,
+) -> bool:
+    """Verify automation provenance from the first transcript record only.
+
+    A caller-controlled path is never enough: the resolved regular file must
+    live below Codex's active or archived transcript roots, use the expected
+    rollout filename, be owned by the current user, and start with matching
+    ``session_meta``. Invalid or unreadable input simply receives no exemption
+    so the ordinary routing policy remains in force.
+    """
+
+    if not transcript_path or not transcript_path.strip():
+        return False
+    try:
+        candidate = Path(transcript_path).expanduser()
+        resolved_path = candidate.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+    resolved_roots: list[Path] = []
+    for root in (_codex_home() / "sessions", _codex_home() / "archived_sessions"):
+        try:
+            resolved_roots.append(root.resolve(strict=True))
+        except (OSError, RuntimeError):
+            continue
+    if not any(_path_is_within(resolved_path, root) for root in resolved_roots):
+        return False
+
+    expected_suffix = f"-{session_id}.jsonl"
+    if (
+        not resolved_path.name.startswith("rollout-")
+        or not resolved_path.name.endswith(expected_suffix)
+    ):
+        return False
+    try:
+        metadata = resolved_path.stat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        return False
+
+    try:
+        with resolved_path.open("rb") as handle:
+            first_line = handle.readline(MAX_SESSION_META_BYTES + 1)
+        if not first_line or len(first_line) > MAX_SESSION_META_BYTES:
+            return False
+        record = json.loads(first_line.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return False
+    session_meta = record.get("payload")
+    if not isinstance(session_meta, dict):
+        return False
+    if session_meta.get("id") != session_id:
+        return False
+    recorded_session_id = session_meta.get("session_id")
+    if recorded_session_id is not None and recorded_session_id != session_id:
+        return False
+    return session_meta.get("thread_source") == "automation"
+
+
+def _read_active_automation_config(
+    automation_id: str,
+    expected_kind: str,
+) -> Optional[dict[str, Any]]:
+    if re.fullmatch(AUTOMATION_ID_TEXT, automation_id) is None:
+        return None
+    if automation_id in {".", ".."}:
+        return None
+
+    try:
+        automation_root = (_codex_home() / "automations").resolve(strict=True)
+        unresolved_path = automation_root / automation_id / "automation.toml"
+        unresolved_metadata = unresolved_path.lstat()
+        config_path = unresolved_path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not stat.S_ISREG(unresolved_metadata.st_mode):
+        return None
+    if not _path_is_within(config_path, automation_root):
+        return None
+    if config_path.parent.name != automation_id or config_path.parent.parent != automation_root:
+        return None
+    try:
+        metadata = config_path.stat()
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o022
+    ):
+        return None
+
+    try:
+        with config_path.open("rb") as handle:
+            raw_config = handle.read(MAX_AUTOMATION_CONFIG_BYTES + 1)
+        if not raw_config or len(raw_config) > MAX_AUTOMATION_CONFIG_BYTES:
+            return None
+        config_text = raw_config.decode("utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+    parsed: dict[str, Any] = {}
+    for line in config_text.splitlines():
+        string_match = AUTOMATION_CONFIG_STRING_LINE.fullmatch(line)
+        if string_match:
+            key = string_match.group("key")
+            if key in parsed:
+                return None
+            try:
+                value = json.loads(string_match.group("value"))
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(value, str):
+                return None
+            parsed[key] = value
+            continue
+        cwds_match = AUTOMATION_CONFIG_CWDS_LINE.fullmatch(line)
+        if cwds_match:
+            if "cwds" in parsed:
+                return None
+            try:
+                cwds = json.loads(cwds_match.group("value"))
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(cwds, list) or not all(
+                isinstance(item, str) and item for item in cwds
+            ):
+                return None
+            parsed["cwds"] = cwds
+
+    if parsed.get("id") != automation_id:
+        return None
+    if parsed.get("kind") != expected_kind or parsed.get("status") != "ACTIVE":
+        return None
+    return parsed
+
+
+def _same_automation_instructions(envelope_text: str, configured_text: Any) -> bool:
+    if not isinstance(configured_text, str):
+        return False
+    normalized_envelope = envelope_text.replace("\r\n", "\n").rstrip("\n")
+    normalized_config = configured_text.replace("\r\n", "\n").rstrip("\n")
+    return normalized_envelope == normalized_config
+
+
+def _validated_cron_automation_envelope(
+    prompt: str,
+    *,
+    cwd: str,
+) -> bool:
+    cron_match = CRON_ENVELOPE_PATTERN.fullmatch(prompt)
+    if not cron_match:
+        return False
+    automation_id = cron_match.group("id")
+    config = _read_active_automation_config(automation_id, "cron")
+    if not config:
+        return False
+    if config.get("name") != cron_match.group("name"):
+        return False
+    if not _same_automation_instructions(
+        cron_match.group("instructions"), config.get("prompt")
+    ):
+        return False
+    if not isinstance(config.get("model"), str) or not config["model"].strip():
+        return False
+    if not isinstance(config.get("reasoning_effort"), str) or not config[
+        "reasoning_effort"
+    ].strip():
+        return False
+    configured_cwds = config.get("cwds")
+    if not isinstance(configured_cwds, list):
+        return False
+    normalized_cwd = os.path.normpath(os.path.expanduser(cwd))
+    if normalized_cwd not in {
+        os.path.normpath(os.path.expanduser(configured_cwd))
+        for configured_cwd in configured_cwds
+    }:
+        return False
+    return True
 
 
 def _is_chat(text: str) -> bool:
@@ -474,14 +697,42 @@ def _route_selection_observed(session: Optional[dict[str, Any]]) -> bool:
     )
 
 
+def _automation_exempt(session: Optional[dict[str, Any]]) -> bool:
+    return _session_flag(session, "automation_exempt", default=False)
+
+
 def _decide(
     prompt: str,
     session: Optional[dict[str, Any]],
+    *,
+    automation_exempt: bool = False,
+    current_automation_trigger: bool = False,
 ) -> tuple[str, str, Optional[str], bool]:
     text = _normalize_for_match(prompt)
     last_signature = session.get("last_observed_signature") if session else None
     prompt_shown = _route_prompt_shown(session)
     selection_observed = _route_selection_observed(session)
+
+    if automation_exempt:
+        if current_automation_trigger:
+            return "skip", "scheduled_automation", last_signature, selection_observed
+        replacement_pending = bool(
+            prompt_shown
+            and not selection_observed
+            and last_signature == "routing:user_requested"
+        )
+        if replacement_pending:
+            if _is_initial_selection(text):
+                return "skip", "route_already_set", last_signature, True
+            return "skip", "route_prompt_pending", last_signature, False
+        if _is_user_route_request(text):
+            return "inject", "user_requested", "routing:user_requested", False
+        return (
+            "skip",
+            "automation_thread_followup",
+            last_signature,
+            selection_observed,
+        )
 
     if not prompt_shown:
         if _is_chat(text):
@@ -511,6 +762,11 @@ def _gate_context(reason: str) -> str:
             "本会话首次实质任务：执行前调用 model-routing-advisor 给出路由卡并等待选择。"
             "之后仅在用户明确要求改选时重路由；不得自动切换模型。"
         )
+    elif reason == "scheduled_automation":
+        instruction = (
+            "自动化来源已核验：routing-not-required；不生成模型路由卡、不等待确认，"
+            "直接执行本次自动化；其他安全、权限及现实行动门禁照常。"
+        )
     else:
         instruction = (
             "模型路由门禁状态异常：执行前人工检查 model-routing-advisor；"
@@ -525,7 +781,7 @@ def _gate_context(reason: str) -> str:
 
 def _normal_output(decision: str, reason: str) -> dict[str, Any]:
     result: dict[str, Any] = {"continue": True}
-    if decision == "inject":
+    if decision == "inject" or reason == "scheduled_automation":
         result["hookSpecificOutput"] = {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": _gate_context(reason),
@@ -553,9 +809,7 @@ def resolve_state_dir() -> Path:
     configured = os.environ.get(STATE_DIR_ENV)
     if configured:
         return Path(configured).expanduser()
-    codex_home = os.environ.get("CODEX_HOME")
-    base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
-    return base / "model-routing-advisor" / "global-gate"
+    return _codex_home() / "model-routing-advisor" / "global-gate"
 
 
 def process_hook(
@@ -589,6 +843,23 @@ def process_hook(
             prompt_count = _session_counter(session)
             prompt_shown = _route_prompt_shown(session)
             selection_observed = _route_selection_observed(session)
+            previously_automation_exempt = _automation_exempt(session)
+            transcript_automation = _is_authoritative_automation_transcript(
+                payload.get("transcript_path"), payload["session_id"]
+            )
+            cron_envelope_valid = bool(
+                transcript_automation
+                and _validated_cron_automation_envelope(
+                    prompt,
+                    cwd=payload["cwd"],
+                )
+            )
+            current_automation_trigger = bool(
+                cron_envelope_valid and not previously_automation_exempt
+            )
+            automation_exempt = bool(
+                previously_automation_exempt or transcript_automation
+            )
 
             is_duplicate = bool(
                 session
@@ -597,11 +868,19 @@ def process_hook(
             )
             if is_duplicate:
                 decision = "skip"
-                reason = "duplicate_hook_invocation"
+                reason = (
+                    "scheduled_automation"
+                    if automation_exempt
+                    and session.get("last_reason") == "scheduled_automation"
+                    else "duplicate_hook_invocation"
+                )
                 signature = session.get("last_observed_signature")
             else:
                 decision, reason, signature, selection_observed = _decide(
-                    prompt, session
+                    prompt,
+                    session,
+                    automation_exempt=automation_exempt,
+                    current_automation_trigger=current_automation_trigger,
                 )
             if decision == "inject":
                 prompt_count += 1
@@ -618,6 +897,7 @@ def process_hook(
                 "route_prompt_count": prompt_count,
                 "route_prompt_shown": prompt_shown,
                 "route_selection_observed": selection_observed,
+                "automation_exempt": automation_exempt,
                 "last_seen_at": event_time,
             }
             # Do not evict old session records. Losing a record would make an
@@ -633,6 +913,7 @@ def process_hook(
                 "decision": decision,
                 "reason": reason,
                 "observed_signature": signature,
+                "automation_exempt": automation_exempt,
             }
             _atomic_write_json(state_path, state)
             _append_event(log_path, event)

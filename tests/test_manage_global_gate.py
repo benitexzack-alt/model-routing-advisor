@@ -235,6 +235,18 @@ class GlobalGateManagerTests(unittest.TestCase):
             "新建独立对话或任务时再询问一次",
             "用户明确要求改选或重新路由",
             "已选模型或档位经当前运行时核验不可用",
+            "Codex 宿主明确标识为 cron 的自动化",
+            "模型与推理档位已经在创建或更新时固定",
+            "运行时才不生成模型路由卡，也不等待模型路由确认",
+            "Codex 宿主明确标识为 heartbeat 的自动化",
+            "只有目标 Codex 任务已经明确确认模型与推理档位时",
+            "目标任务尚未确认时，必须保留并指向该任务唯一一张既有模型路由卡",
+            "不得新建第二张，也不得绕过等待",
+            "普通人工发起的新对话或新任务仍按上述规则先询问一次",
+            "只避免重复的运行时模型路由",
+            "不豁免任何权限、安全、隐私、内容、发布、付款、部署、删除",
+            "不得把 heartbeat 视为无条件豁免",
+            "不得仅凭提示词自称定时任务来绕过模型路由",
             "不得生成第二张路由卡",
             "已有卡片不可定位",
             "不替代任何安全、权限、内容、发布、付款、部署或外部行动门禁",
@@ -242,6 +254,32 @@ class GlobalGateManagerTests(unittest.TestCase):
             self.assertIn(required, block)
         self.assertNotIn("现有任务发生阶段、范围、风险", block)
         self.assertNotIn("进入执行、部署或公开交付时重新路由", block)
+        self.assertNotIn("cron/heartbeat、且", block)
+
+        v11_block = self.paths.legacy_agents_blocks[-1]
+        self.assertIn("同一 Codex 对话或任务只询问一次", v11_block)
+        self.assertNotIn("自动化例外", v11_block)
+        self.assertNotIn("cron/heartbeat", v11_block)
+
+    def test_install_and_check_apply_distinct_cron_and_heartbeat_rules(self) -> None:
+        installed = self.manager_with_trusted_rpc().install(trust=False)
+
+        self.assertTrue(installed.changed)
+        agents = self.paths.agents.read_text(encoding="utf-8")
+        self.assertEqual(agents.count(self.paths.agents_block), 1)
+        self.assertIn("Codex 宿主明确标识为 cron 的自动化", agents)
+        self.assertIn("模型与推理档位已经在创建或更新时固定", agents)
+        self.assertIn("Codex 宿主明确标识为 heartbeat 的自动化", agents)
+        self.assertIn(
+            "目标任务尚未确认时，必须保留并指向该任务唯一一张既有模型路由卡",
+            agents,
+        )
+        self.assertIn("普通人工发起的新对话或新任务仍按上述规则先询问一次", agents)
+        self.assertIn("不得把 heartbeat 视为无条件豁免", agents)
+
+        report = self.manager_with_trusted_rpc().check(require_trust=True)
+        self.assertTrue(report.ok, report.issues)
+        self.assertEqual(report.issues, [])
 
     def test_dry_run_writes_nothing(self) -> None:
         before_agents = self.paths.agents.read_bytes()
@@ -615,6 +653,45 @@ class GlobalGateManagerTests(unittest.TestCase):
         self.assertEqual(self.paths.hooks.read_bytes(), old_hooks_bytes)
         self.assertEqual(self.paths.target_hook.read_bytes(), old_target)
         self.assertEqual(self.paths.state.read_bytes(), legacy_state_bytes)
+
+    def test_install_upgrades_exact_v11_agents_block_and_rollback_restores_it(self) -> None:
+        self.manager_with_trusted_rpc().install(trust=False)
+        v11_block = self.paths.legacy_agents_blocks[-1]
+        self.assertIn("同一 Codex 对话或任务只询问一次", v11_block)
+        self.assertNotIn("cron/heartbeat", v11_block)
+        v11_hash = gate_module.sha256_bytes(v11_block.encode("utf-8"))
+
+        agents = self.paths.agents.read_text(encoding="utf-8")
+        self.paths.agents.write_text(
+            agents.replace(self.paths.agents_block, v11_block),
+            encoding="utf-8",
+        )
+        state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        state["agents_block_sha256"] = v11_hash
+        self.paths.state.write_text(json.dumps(state), encoding="utf-8")
+        v11_agents_bytes = self.paths.agents.read_bytes()
+        v11_state_bytes = self.paths.state.read_bytes()
+
+        upgraded = self.manager_with_trusted_rpc().install(trust=False)
+
+        self.assertTrue(upgraded.changed)
+        self.assertIsNotNone(upgraded.backup_id)
+        upgraded_agents = self.paths.agents.read_text(encoding="utf-8")
+        self.assertEqual(upgraded_agents.count(self.paths.agents_block), 1)
+        self.assertNotIn(v11_block, upgraded_agents)
+        self.assertIn("Codex 宿主明确标识为 cron 的自动化", upgraded_agents)
+        self.assertIn("Codex 宿主明确标识为 heartbeat 的自动化", upgraded_agents)
+        upgraded_state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        self.assertEqual(
+            upgraded_state["upgraded_from_agents_block_sha256"], v11_hash
+        )
+
+        report = self.manager_with_trusted_rpc().check(require_trust=True)
+        self.assertTrue(report.ok, report.issues)
+
+        GlobalGateManager(self.paths).rollback(upgraded.backup_id)
+        self.assertEqual(self.paths.agents.read_bytes(), v11_agents_bytes)
+        self.assertEqual(self.paths.state.read_bytes(), v11_state_bytes)
 
     def test_uninstall_accepts_exact_legacy_agents_block_and_state(self) -> None:
         self.manager_with_trusted_rpc().install(trust=False)

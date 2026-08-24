@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Optional
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,7 @@ def payload(
     session_id: str = "session-1",
     turn_id: str = "turn-1",
     cwd: str = "/tmp/example-project",
+    transcript_path: str = "/tmp/session.jsonl",
 ) -> dict[str, str]:
     return {
         "hook_event_name": "UserPromptSubmit",
@@ -38,8 +40,113 @@ def payload(
         "prompt": prompt,
         "model": "gpt-5.6-sol",
         "permission_mode": "dontAsk",
-        "transcript_path": "/tmp/session.jsonl",
+        "transcript_path": transcript_path,
     }
+
+
+def write_transcript(
+    codex_home: Path,
+    session_id: str,
+    *,
+    day: str = "2026/08/24",
+    thread_source: str = "automation",
+    recorded_id: Optional[str] = None,
+) -> Path:
+    transcript_dir = codex_home / "sessions" / day
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    date_label = day.replace("/", "-")
+    transcript_path = (
+        transcript_dir / f"rollout-{date_label}T01-00-00-{session_id}.jsonl"
+    )
+    metadata_id = recorded_id or session_id
+    record = {
+        "timestamp": "2026-08-24T01:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": metadata_id,
+            "session_id": metadata_id,
+            "thread_source": thread_source,
+        },
+    }
+    transcript_path.write_text(
+        json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return transcript_path
+
+
+def write_automation_config(
+    codex_home: Path,
+    automation_id: str,
+    *,
+    kind: str,
+    prompt: str,
+    name: str = "测试自动化",
+    status: str = "ACTIVE",
+    target_thread_id: Optional[str] = None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    cwds: Optional[list[str]] = None,
+    configured_id: Optional[str] = None,
+) -> Path:
+    automation_dir = codex_home / "automations" / automation_id
+    automation_dir.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "version = 1",
+        f"id = {json.dumps(configured_id or automation_id, ensure_ascii=False)}",
+        f"kind = {json.dumps(kind, ensure_ascii=False)}",
+        f"name = {json.dumps(name, ensure_ascii=False)}",
+        f"prompt = {json.dumps(prompt, ensure_ascii=False)}",
+        f"status = {json.dumps(status, ensure_ascii=False)}",
+    ]
+    if target_thread_id is not None:
+        fields.append(
+            f"target_thread_id = {json.dumps(target_thread_id, ensure_ascii=False)}"
+        )
+    if model is not None:
+        fields.append(f"model = {json.dumps(model, ensure_ascii=False)}")
+    if reasoning_effort is not None:
+        fields.append(
+            f"reasoning_effort = {json.dumps(reasoning_effort, ensure_ascii=False)}"
+        )
+    if cwds is not None:
+        fields.append(f"cwds = {json.dumps(cwds, ensure_ascii=False)}")
+    config_path = automation_dir / "automation.toml"
+    config_path.write_text("\n".join(fields) + "\n", encoding="utf-8")
+    return config_path
+
+
+def heartbeat_envelope(
+    automation_id: str,
+    instructions: str,
+    *,
+    current_time: str = "2026-08-25T00:31:41.123Z",
+) -> str:
+    return (
+        "<heartbeat>\n"
+        f"  <automation_id>{automation_id}</automation_id>\n"
+        f"  <current_time_iso>{current_time}</current_time_iso>\n"
+        "  <instructions>\n"
+        f"{instructions}\n"
+        "  </instructions>\n"
+        "</heartbeat>\n"
+    )
+
+
+def cron_envelope(
+    automation_id: str,
+    name: str,
+    instructions: str,
+    *,
+    last_run: str = "never",
+) -> str:
+    return (
+        f"Automation: {name}\n"
+        f"Automation ID: {automation_id}\n"
+        f"Automation memory: $CODEX_HOME/automations/{automation_id}/memory.md\n"
+        f"Last run: {last_run}\n\n"
+        f"{instructions}"
+    )
 
 
 def injected_context(result: dict) -> Optional[str]:
@@ -50,6 +157,740 @@ def injected_context(result: dict) -> Optional[str]:
 
 
 class GlobalGateBehaviorTests(unittest.TestCase):
+    def assert_scheduled_context(self, result: dict) -> None:
+        context = injected_context(result)
+        self.assertIsNotNone(context)
+        self.assertIn('reason="scheduled_automation"', context)
+        self.assertIn("routing-not-required", context)
+        self.assertIn("不生成模型路由卡", context)
+        self.assertIn("不等待确认", context)
+        self.assertIn("直接执行本次自动化", context)
+        self.assertIn("其他安全、权限及现实行动门禁照常", context)
+        self.assertNotIn("给出路由卡并等待选择", context)
+        self.assertNotIn("请用户确认", context)
+
+    def test_distinct_daily_automation_sessions_are_exempt(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            automation_id = "daily-cron"
+            automation_name = "每日任务"
+            instructions = "生成今天的每日任务报告。"
+            write_automation_config(
+                codex_home,
+                automation_id,
+                kind="cron",
+                prompt=instructions,
+                name=automation_name,
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+                cwds=["/tmp/example-project"],
+            )
+            first_path = write_transcript(
+                codex_home,
+                "daily-session-one",
+                day="2026/08/24",
+            )
+            second_path = write_transcript(
+                codex_home,
+                "daily-session-two",
+                day="2026/08/25",
+            )
+            first_prompt = cron_envelope(
+                automation_id,
+                automation_name,
+                instructions,
+            )
+            second_prompt = cron_envelope(
+                automation_id,
+                automation_name,
+                instructions,
+                last_run="2026-08-24T01:00:00.000Z (1787533200000)",
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                first = process_hook(
+                    payload(
+                        first_prompt,
+                        session_id="daily-session-one",
+                        transcript_path=str(first_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                second = process_hook(
+                    payload(
+                        second_prompt,
+                        session_id="daily-session-two",
+                        transcript_path=str(second_path),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assert_scheduled_context(first)
+            self.assert_scheduled_context(second)
+            state_text = (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            state = json.loads(state_text)
+            for session_id in ("daily-session-one", "daily-session-two"):
+                session = state["sessions"][session_id]
+                self.assertTrue(session["automation_exempt"])
+                self.assertFalse(session["route_prompt_shown"])
+                self.assertEqual(session["route_prompt_count"], 0)
+                self.assertEqual(session["last_reason"], "scheduled_automation")
+            log_text = (state_dir / "gate-events.jsonl").read_text(encoding="utf-8")
+            events = [json.loads(line) for line in log_text.splitlines()]
+            self.assertEqual(
+                [event["reason"] for event in events],
+                ["scheduled_automation", "scheduled_automation"],
+            )
+            self.assertTrue(all(event["automation_exempt"] for event in events))
+            self.assertNotIn(first_prompt, state_text)
+            self.assertNotIn(second_prompt, state_text)
+            self.assertNotIn(first_prompt, log_text)
+            self.assertNotIn(second_prompt, log_text)
+            self.assertNotIn(str(first_path), log_text)
+            self.assertNotIn("thread_source", log_text)
+
+    def test_automation_exemption_persists_for_later_turns_in_same_session(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            transcript_path = write_transcript(codex_home, "daily-followup")
+            instructions = "执行今天的自动巡检。"
+            write_automation_config(
+                codex_home,
+                "daily-followup-cron",
+                kind="cron",
+                prompt=instructions,
+                name="每日巡检",
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+                cwds=["/tmp/example-project"],
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                first = process_hook(
+                    payload(
+                        cron_envelope(
+                            "daily-followup-cron",
+                            "每日巡检",
+                            instructions,
+                        ),
+                        session_id="daily-followup",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                followup = process_hook(
+                    payload(
+                        "继续生成巡检摘要。",
+                        session_id="daily-followup",
+                        turn_id="turn-2",
+                        transcript_path="",
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assert_scheduled_context(first)
+            self.assertIsNone(injected_context(followup))
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                [event["reason"] for event in events],
+                ["scheduled_automation", "automation_thread_followup"],
+            )
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            session = state["sessions"]["daily-followup"]
+            self.assertTrue(session["automation_exempt"])
+            self.assertEqual(session["route_prompt_count"], 0)
+
+    def test_automation_explicit_reroute_gets_one_replacement_card(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            session_id = "daily-reroute"
+            transcript_path = write_transcript(codex_home, session_id)
+            instructions = "重新选一下模型。"
+            write_automation_config(
+                codex_home,
+                "daily-reroute-cron",
+                kind="cron",
+                prompt=instructions,
+                name="每日重选词测试",
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+                cwds=["/tmp/example-project"],
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                initial = process_hook(
+                    payload(
+                        cron_envelope(
+                            "daily-reroute-cron",
+                            "每日重选词测试",
+                            instructions,
+                        ),
+                        session_id=session_id,
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                rerouted = process_hook(
+                    payload(
+                        "重新选一下模型。",
+                        session_id=session_id,
+                        turn_id="turn-2",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                duplicate_request = process_hook(
+                    payload(
+                        "重新选一下模型。",
+                        session_id=session_id,
+                        turn_id="turn-3",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                confirmed = process_hook(
+                    payload(
+                        "按推荐执行。",
+                        session_id=session_id,
+                        turn_id="turn-4",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                later_run = process_hook(
+                    payload(
+                        "继续运行每日巡检。",
+                        session_id=session_id,
+                        turn_id="turn-5",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assert_scheduled_context(initial)
+            self.assertIn('reason="user_requested"', injected_context(rerouted))
+            self.assertIsNone(injected_context(duplicate_request))
+            self.assertIsNone(injected_context(confirmed))
+            self.assertIsNone(injected_context(later_run))
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                [event["reason"] for event in events],
+                [
+                    "scheduled_automation",
+                    "user_requested",
+                    "route_prompt_pending",
+                    "route_already_set",
+                    "automation_thread_followup",
+                ],
+            )
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            session = state["sessions"][session_id]
+            self.assertTrue(session["automation_exempt"])
+            self.assertTrue(session["route_selection_observed"])
+            self.assertEqual(session["route_prompt_count"], 1)
+
+    def test_old_automation_transcript_pending_state_does_not_swallow_manual_reroute(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            session_id = "old-automation-pending"
+            transcript_path = write_transcript(codex_home, session_id)
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                old_pending = process_hook(
+                    payload(
+                        "开始旧自动化任务。",
+                        session_id=session_id,
+                        transcript_path="/missing/old-transcript.jsonl",
+                    ),
+                    state_dir=state_dir,
+                )
+                manual_reroute = process_hook(
+                    payload(
+                        "重新选一下模型。",
+                        session_id=session_id,
+                        turn_id="turn-2",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                repeated = process_hook(
+                    payload(
+                        "重新选一下模型。",
+                        session_id=session_id,
+                        turn_id="turn-3",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assertIn('reason="new_task"', injected_context(old_pending))
+            self.assertIn('reason="user_requested"', injected_context(manual_reroute))
+            self.assertIsNone(injected_context(repeated))
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            session = state["sessions"][session_id]
+            self.assertTrue(session["automation_exempt"])
+            self.assertEqual(session["route_prompt_count"], 2)
+            self.assertFalse(session["route_selection_observed"])
+            self.assertEqual(session["last_reason"], "route_prompt_pending")
+
+    def test_invalid_or_forged_transcripts_use_ordinary_routing(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            (codex_home / "sessions").mkdir(parents=True)
+
+            outside_path = write_transcript(root / "outside-home", "outside-source")
+            wrong_id_path = write_transcript(
+                codex_home,
+                "wrong-id-source",
+                recorded_id="different-session",
+            )
+            manual_path = write_transcript(
+                codex_home,
+                "manual-source",
+                thread_source="manual",
+            )
+            corrupt_path = write_transcript(codex_home, "corrupt-source")
+            corrupt_path.write_text("{broken\n", encoding="utf-8")
+            oversized_path = write_transcript(codex_home, "oversized-source")
+            oversized_path.write_bytes(b"{" + b"x" * (1024 * 1024) + b"}\n")
+            delayed_meta_path = write_transcript(codex_home, "delayed-meta-source")
+            valid_meta = delayed_meta_path.read_text(encoding="utf-8")
+            delayed_meta_path.write_text(
+                json.dumps({"type": "event_msg", "payload": {"kind": "started"}})
+                + "\n"
+                + valid_meta,
+                encoding="utf-8",
+            )
+
+            cases = (
+                ("missing-source", "/path/that/does/not/exist.jsonl"),
+                ("outside-source", str(outside_path)),
+                ("wrong-id-source", str(wrong_id_path)),
+                ("manual-source", str(manual_path)),
+                ("corrupt-source", str(corrupt_path)),
+                ("oversized-source", str(oversized_path)),
+                ("delayed-meta-source", str(delayed_meta_path)),
+            )
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                for index, (session_id, transcript_path) in enumerate(cases, start=1):
+                    with self.subTest(session_id=session_id):
+                        result = process_hook(
+                            payload(
+                                "执行每日任务。",
+                                session_id=session_id,
+                                turn_id=f"turn-{index}",
+                                transcript_path=transcript_path,
+                            ),
+                            state_dir=state_dir,
+                        )
+                        self.assertIn('reason="new_task"', injected_context(result))
+
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            for session_id, _ in cases:
+                self.assertFalse(state["sessions"][session_id]["automation_exempt"])
+
+    def test_automation_body_with_routing_words_still_skips(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        prompts = (
+            "每日统计正文中“重新选模型”和“优先保证质量”的出现次数。",
+            "每日检查模型路由数据；不要重新选模型，按原计划生成日报。",
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            session_id = "daily-route-words"
+            transcript_path = write_transcript(codex_home, session_id)
+            write_automation_config(
+                codex_home,
+                "daily-route-words-cron",
+                kind="cron",
+                prompt=prompts[0],
+                name="路由词日报",
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+                cwds=["/tmp/example-project"],
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                initial = process_hook(
+                    payload(
+                        cron_envelope(
+                            "daily-route-words-cron",
+                            "路由词日报",
+                            prompts[0],
+                        ),
+                        session_id=session_id,
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                followup = process_hook(
+                    payload(
+                        prompts[1],
+                        session_id=session_id,
+                        turn_id="turn-2",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assert_scheduled_context(initial)
+            self.assertIsNone(injected_context(followup))
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                [event["reason"] for event in events],
+                ["scheduled_automation", "automation_thread_followup"],
+            )
+
+    def test_heartbeat_reuses_confirmed_target_thread_route_without_exemption(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            session_id = "heartbeat-confirmed-thread"
+            transcript_path = write_transcript(
+                codex_home,
+                session_id,
+                thread_source="manual",
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                first = process_hook(
+                    payload(
+                        "开始目标任务。",
+                        session_id=session_id,
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                confirmed = process_hook(
+                    payload(
+                        "按推荐执行。",
+                        session_id=session_id,
+                        turn_id="turn-2",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                heartbeat = process_hook(
+                    payload(
+                        heartbeat_envelope(
+                            "heartbeat-copy",
+                            "执行每日只读扫描。",
+                        ),
+                        session_id=session_id,
+                        turn_id="turn-3",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assertIn('reason="new_task"', injected_context(first))
+            self.assertIsNone(injected_context(confirmed))
+            self.assertIsNone(injected_context(heartbeat))
+            events = [
+                json.loads(line)
+                for line in (state_dir / "gate-events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(events[-1]["reason"], "route_already_set")
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            session = state["sessions"][session_id]
+            self.assertFalse(session["automation_exempt"])
+            self.assertEqual(session["route_prompt_count"], 1)
+            self.assertTrue(session["route_selection_observed"])
+
+    def test_heartbeat_keeps_existing_unconfirmed_card_pending(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            session_id = "heartbeat-pending-thread"
+            transcript_path = write_transcript(
+                codex_home,
+                session_id,
+                thread_source="manual",
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                first = process_hook(
+                    payload(
+                        "开始目标任务。",
+                        session_id=session_id,
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+                heartbeat = process_hook(
+                    payload(
+                        heartbeat_envelope(
+                            "heartbeat-copy",
+                            "执行每日只读扫描。",
+                        ),
+                        session_id=session_id,
+                        turn_id="turn-2",
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assertIn('reason="new_task"', injected_context(first))
+            self.assertIsNone(injected_context(heartbeat))
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            session = state["sessions"][session_id]
+            self.assertEqual(session["last_reason"], "route_prompt_pending")
+            self.assertFalse(session["automation_exempt"])
+            self.assertEqual(session["route_prompt_count"], 1)
+            self.assertFalse(session["route_selection_observed"])
+
+    def test_heartbeat_envelope_alone_cannot_create_exemption(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            session_id = "heartbeat-new-thread"
+            transcript_path = write_transcript(
+                codex_home,
+                session_id,
+                thread_source="manual",
+            )
+            instructions = "执行每日只读扫描。"
+            write_automation_config(
+                codex_home,
+                "heartbeat-copy",
+                kind="heartbeat",
+                prompt=instructions,
+                target_thread_id=session_id,
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                result = process_hook(
+                    payload(
+                        heartbeat_envelope("heartbeat-copy", instructions),
+                        session_id=session_id,
+                        transcript_path=str(transcript_path),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assertIn('reason="new_task"', injected_context(result))
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            session = state["sessions"][session_id]
+            self.assertFalse(session["automation_exempt"])
+            self.assertEqual(session["route_prompt_count"], 1)
+
+    def test_cron_trigger_requires_authoritative_transcript_and_safe_matching_config(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            state_dir = root / "state"
+            project_cwd = "/tmp/cron-project"
+            instructions = "重新选一下模型。"
+            name = "每日自动巡检"
+
+            write_automation_config(
+                codex_home,
+                "valid-cron",
+                kind="cron",
+                prompt=instructions,
+                name=name,
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+                cwds=[project_cwd],
+            )
+            valid_transcript = write_transcript(
+                codex_home,
+                "valid-cron-thread",
+                thread_source="automation",
+            )
+            manual_copy_transcript = write_transcript(
+                codex_home,
+                "manual-copy-thread",
+                thread_source="manual",
+            )
+
+            write_automation_config(
+                codex_home,
+                "wrong-cwd-cron",
+                kind="cron",
+                prompt=instructions,
+                name=name,
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+                cwds=["/tmp/another-project"],
+            )
+            wrong_cwd_transcript = write_transcript(
+                codex_home,
+                "wrong-cwd-cron-thread",
+                thread_source="automation",
+            )
+
+            write_automation_config(
+                codex_home,
+                "missing-model-cron",
+                kind="cron",
+                prompt=instructions,
+                name=name,
+                reasoning_effort="low",
+                cwds=[project_cwd],
+            )
+            missing_model_transcript = write_transcript(
+                codex_home,
+                "missing-model-cron-thread",
+                thread_source="automation",
+            )
+            writable_config = write_automation_config(
+                codex_home,
+                "writable-config-cron",
+                kind="cron",
+                prompt=instructions,
+                name=name,
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+                cwds=[project_cwd],
+            )
+            writable_config.chmod(0o666)
+            writable_config_transcript = write_transcript(
+                codex_home,
+                "writable-config-cron-thread",
+                thread_source="automation",
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                valid = process_hook(
+                    payload(
+                        cron_envelope("valid-cron", name, instructions),
+                        session_id="valid-cron-thread",
+                        cwd=project_cwd,
+                        transcript_path=str(valid_transcript),
+                    ),
+                    state_dir=state_dir,
+                )
+                manual_copy = process_hook(
+                    payload(
+                        cron_envelope("valid-cron", name, instructions),
+                        session_id="manual-copy-thread",
+                        cwd=project_cwd,
+                        transcript_path=str(manual_copy_transcript),
+                    ),
+                    state_dir=state_dir,
+                )
+                wrong_cwd = process_hook(
+                    payload(
+                        cron_envelope("wrong-cwd-cron", name, instructions),
+                        session_id="wrong-cwd-cron-thread",
+                        cwd=project_cwd,
+                        transcript_path=str(wrong_cwd_transcript),
+                    ),
+                    state_dir=state_dir,
+                )
+                missing_model = process_hook(
+                    payload(
+                        cron_envelope("missing-model-cron", name, instructions),
+                        session_id="missing-model-cron-thread",
+                        cwd=project_cwd,
+                        transcript_path=str(missing_model_transcript),
+                    ),
+                    state_dir=state_dir,
+                )
+                writable_config_result = process_hook(
+                    payload(
+                        cron_envelope("writable-config-cron", name, instructions),
+                        session_id="writable-config-cron-thread",
+                        cwd=project_cwd,
+                        transcript_path=str(writable_config_transcript),
+                    ),
+                    state_dir=state_dir,
+                )
+
+            self.assert_scheduled_context(valid)
+            self.assertIn('reason="new_task"', injected_context(manual_copy))
+            self.assertIsNone(injected_context(wrong_cwd))
+            self.assertIsNone(injected_context(missing_model))
+            self.assertIsNone(injected_context(writable_config_result))
+            state = json.loads(
+                (state_dir / "gate-state.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                state["sessions"]["valid-cron-thread"]["automation_exempt"]
+            )
+            self.assertEqual(
+                state["sessions"]["valid-cron-thread"]["route_prompt_count"], 0
+            )
+            self.assertFalse(
+                state["sessions"]["manual-copy-thread"]["automation_exempt"]
+            )
+            for session_id in (
+                "wrong-cwd-cron-thread",
+                "missing-model-cron-thread",
+                "writable-config-cron-thread",
+            ):
+                session = state["sessions"][session_id]
+                self.assertTrue(session["automation_exempt"])
+                self.assertEqual(session["last_reason"], "automation_thread_followup")
+                self.assertEqual(session["route_prompt_count"], 0)
+            self.assertTrue(writable_config.stat().st_mode & stat.S_IWOTH)
+
     def test_new_substantive_task_injects_short_context_and_hash_only_log(self) -> None:
         with self.subTest("new task"):
             from tempfile import TemporaryDirectory
